@@ -1170,12 +1170,19 @@ def ensure_results_dir():
 
 
 if __name__ == "__main__":
-    # Load config
+    # Load config and strategy parameters
     config = load_config()
+    bbands_params = config["strategy_params"]["bbands"]
+    ma_params = config["strategy_params"]["ma"]
+    rsi_params = config["strategy_params"]["rsi"]
+    macd_params = config["strategy_params"]["macd"]
+    psar_params = config["strategy_params"]["psar"]
+    rsi_mean_reversion_params = config["strategy_params"]["rsi_mean_reversion"]
+    mean_reversion_params = config["strategy_params"]["mean_reversion"]
     
     # Load data
     btc_1h, btc_daily, eth_1h, eth_daily = load_data()
-
+    
     # Calculate regimes
     btc_aligned_regime_data, eth_aligned_regime_data = calculate_regimes(
         btc_daily, eth_daily, btc_1h, eth_1h
