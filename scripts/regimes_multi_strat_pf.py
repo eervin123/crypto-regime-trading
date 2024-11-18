@@ -91,18 +91,37 @@ def calculate_regimes_nb(
     price, returns, ma_short_window, ma_long_window, vol_short_window, avg_vol_window
 ):
     """
-    Calculate market regimes based on price, returns, and moving average and volatility parameters.
+    Calculate market regimes based on price action and volatility metrics.
+    
+    This function combines moving averages and volatility measures to classify market conditions
+    into different regimes:
+    1: Above Average Volatility Bull Trend
+    2: Below Average Volatility Bull Trend
+    3: Above Average Volatility Sideways
+    4: Below Average Volatility Sideways
+    5: Above Average Volatility Bear Trend
+    6: Below Average Volatility Bear Trend
+    -1: Unknown/Undefined Regime
 
     Parameters:
-    price (np.ndarray): Array of prices.
-    returns (np.ndarray): Array of returns.
-    ma_short_window (int): Window size for the short moving average.
-    ma_long_window (int): Window size for the long moving average.
-    vol_short_window (int): Window size for the short volatility calculation.
-    avg_vol_window (int): Window size for the average volatility calculation.
+    -----------
+    price : np.ndarray
+        Array of asset prices
+    returns : np.ndarray
+        Array of asset returns
+    ma_short_window : int
+        Window size for short-term moving average
+    ma_long_window : int
+        Window size for long-term moving average
+    vol_short_window : int
+        Window size for short-term volatility calculation
+    avg_vol_window : int
+        Window size for average volatility calculation
 
     Returns:
-    np.ndarray: Array of market regimes.
+    --------
+    np.ndarray
+        Array of integer values representing market regimes
     """
     ma_short = rolling_mean_nb(price, ma_short_window)
     ma_long = rolling_mean_nb(price, ma_long_window)
@@ -115,6 +134,39 @@ def calculate_regimes_nb(
 
 @njit
 def psar_nb_with_next(high, low, close, af0=0.02, af_increment=0.02, max_af=0.2):
+    """
+    Calculate Parabolic SAR (Stop And Reverse) values including next-period predictions.
+    
+    This implementation includes both current PSAR values and predicted values for the
+    next period, which can be used for generating trading signals. The function is optimized
+    using Numba for performance.
+
+    Parameters:
+    -----------
+    high : np.ndarray
+        Array of high prices
+    low : np.ndarray
+        Array of low prices
+    close : np.ndarray
+        Array of closing prices
+    af0 : float, optional
+        Initial acceleration factor, default 0.02
+    af_increment : float, optional
+        Acceleration factor increment, default 0.02
+    max_af : float, optional
+        Maximum acceleration factor, default 0.2
+
+    Returns:
+    --------
+    tuple
+        (long, short, af, reversal, next_long, next_short)
+        - long: np.ndarray - PSAR values for long positions
+        - short: np.ndarray - PSAR values for short positions
+        - af: np.ndarray - Acceleration factors
+        - reversal: np.ndarray - Reversal signals (0 or 1)
+        - next_long: np.ndarray - Predicted next-period PSAR for long positions
+        - next_short: np.ndarray - Predicted next-period PSAR for short positions
+    """
     length = len(high)
     long = np.full(length, np.nan)
     short = np.full(length, np.nan)
