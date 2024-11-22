@@ -62,87 +62,79 @@ def load_config():
         return yaml.safe_load(f)
 
 
-def load_data():
-    """Load and prepare BTC and ETH data at different timeframes."""
+def load_data(base_timeframe="1T", analysis_timeframe="30T", regime_timeframe="1D"):
+    """
+    Load and prepare BTC and ETH data at different timeframes.
+    
+    Args:
+        base_timeframe (str): Base timeframe of raw data (e.g., "1T" for 1-minute)
+        analysis_timeframe (str): Main analysis timeframe (e.g., "30T", "1H", "4H")
+        regime_timeframe (str): Timeframe for regime calculation (e.g., "1D")
+    """
     data = vbt.BinanceData.load("data/m1_data.pkl")
 
-    # Hourly data
-    btc_1h = data.resample("1H").data["BTCUSDT"]
-    eth_1h = data.resample("1H").data["ETHUSDT"]
+    # Analysis timeframe data
+    data_analysis = {
+        "BTC": data.resample(analysis_timeframe).data["BTCUSDT"],
+        "ETH": data.resample(analysis_timeframe).data["ETHUSDT"]
+    }
 
-    # Daily data with returns
-    btc_daily = data.resample("1D").data["BTCUSDT"]
-    btc_daily["Return"] = btc_daily["Close"].pct_change()
-    eth_daily = data.resample("1D").data["ETHUSDT"]
-    eth_daily["Return"] = eth_daily["Close"].pct_change()
+    # Regime timeframe data with returns
+    data_regime = {
+        "BTC": data.resample(regime_timeframe).data["BTCUSDT"],
+        "ETH": data.resample(regime_timeframe).data["ETHUSDT"]
+    }
+    
+    # Add returns for regime calculation
+    for symbol in ["BTC", "ETH"]:
+        data_regime[symbol]["Return"] = data_regime[symbol]["Close"].pct_change()
 
-    return btc_1h, btc_daily, eth_1h, eth_daily
+    return data_analysis, data_regime
 
 
-def calculate_regimes(btc_daily, eth_daily, btc_1h, eth_1h):
+def calculate_regimes(data_regime, data_analysis, analysis_timeframe):
     """
     Calculate and align market regimes for BTC and ETH across timeframes.
 
     Args:
-        btc_daily (pd.DataFrame): Daily BTC OHLCV data
-        eth_daily (pd.DataFrame): Daily ETH OHLCV data
-        btc_1h (pd.DataFrame): Hourly BTC OHLCV data
-        eth_1h (pd.DataFrame): Hourly ETH OHLCV data
-
-    Returns:
-        tuple: (btc_aligned_regime_data, eth_aligned_regime_data)
-            Regime data aligned to hourly timeframe for both assets
+        data_regime (dict): Dictionary containing regime timeframe data for each symbol
+        data_analysis (dict): Dictionary containing analysis timeframe data for each symbol
+        analysis_timeframe (str): Timeframe for analysis (e.g., "30T", "1H")
     """
     # Create regime indicators
     RegimeIndicator = vbt.IndicatorFactory(
         class_name="RegimeIndicator",
         input_names=["price", "returns"],
-        param_names=[
-            "ma_short_window",
-            "ma_long_window",
-            "vol_short_window",
-            "avg_vol_window",
-        ],
-        output_names=["regimes"],
+        param_names=["ma_short_window", "ma_long_window", "vol_short_window", "avg_vol_window"],
+        output_names=["regimes"]
     ).with_apply_func(calculate_regimes_nb)
 
-    # Calculate regime indicators
-    btc_regime_indicator = RegimeIndicator.run(
-        btc_daily["Close"],
-        btc_daily["Return"],
-        ma_short_window=21,
-        ma_long_window=88,
-        vol_short_window=21,
-        avg_vol_window=365,
-    )
-    eth_regime_indicator = RegimeIndicator.run(
-        eth_daily["Close"],
-        eth_daily["Return"],
-        ma_short_window=21,
-        ma_long_window=88,
-        vol_short_window=21,
-        avg_vol_window=365,
-    )
+    aligned_regime_data = {}
+    
+    for symbol in ["BTC", "ETH"]:
+        # Calculate regime indicators
+        regime_indicator = RegimeIndicator.run(
+            data_regime[symbol]["Close"],
+            data_regime[symbol]["Return"],
+            ma_short_window=21,
+            ma_long_window=88,
+            vol_short_window=21,
+            avg_vol_window=365,
+        )
 
-    # Add regimes to daily DataFrames
-    btc_daily["Market Regime"] = btc_regime_indicator.regimes.values
-    eth_daily["Market Regime"] = eth_regime_indicator.regimes.values
+        # Add regimes to regime timeframe data
+        data_regime[symbol]["Market Regime"] = regime_indicator.regimes.values
 
-    # Resample and align regime data
-    btc_daily_regime_data = btc_daily["Market Regime"]
-    btc_hourly_regime_data = btc_daily_regime_data.resample("1h").ffill()
-    eth_daily_regime_data = eth_daily["Market Regime"]
-    eth_hourly_regime_data = eth_daily_regime_data.resample("1h").ffill()
+        # Resample and align regime data to analysis timeframe
+        regime_data = data_regime[symbol]["Market Regime"]
+        analysis_regime_data = regime_data.resample(analysis_timeframe).ffill()
+        
+        # Align with analysis timeframe data
+        aligned_regime_data[symbol] = analysis_regime_data.reindex(
+            data_analysis[symbol].index, method="ffill"
+        )
 
-    # Align with hourly data
-    btc_aligned_regime_data = btc_hourly_regime_data.reindex(
-        btc_1h.index, method="ffill"
-    )
-    eth_aligned_regime_data = eth_hourly_regime_data.reindex(
-        eth_1h.index, method="ffill"
-    )
-
-    return btc_aligned_regime_data, eth_aligned_regime_data
+    return aligned_regime_data
 
 
 def validate_timeframe_params(tf1_list, tf2_list):
@@ -1170,47 +1162,43 @@ def ensure_results_dir():
 
 
 if __name__ == "__main__":
-    # Load config and strategy parameters
+    # Load config
     config = load_config()
-    bbands_params = config["strategy_params"]["bbands"]
-    ma_params = config["strategy_params"]["ma"]
-    rsi_params = config["strategy_params"]["rsi"]
-    macd_params = config["strategy_params"]["macd"]
-    psar_params = config["strategy_params"]["psar"]
-    rsi_mean_reversion_params = config["strategy_params"]["rsi_mean_reversion"]
-    mean_reversion_params = config["strategy_params"]["mean_reversion"]
     
-    # Load data
-    btc_1h, btc_daily, eth_1h, eth_daily = load_data()
+    # Get timeframes from config
+    base_tf = config["timeframes"]["base"]  # e.g., "1T"
+    analysis_tf = config["timeframes"]["analysis"]  # e.g., "30T"
+    regime_tf = config["timeframes"]["regime"]  # e.g., "1D"
+
+    # Load data with specified timeframes
+    data_analysis, data_regime = load_data(
+        base_timeframe=base_tf,
+        analysis_timeframe=analysis_tf,
+        regime_timeframe=regime_tf
+    )
     
     # Calculate regimes
-    btc_aligned_regime_data, eth_aligned_regime_data = calculate_regimes(
-        btc_daily, eth_daily, btc_1h, eth_1h
+    aligned_regime_data = calculate_regimes(
+        data_regime, 
+        data_analysis,
+        analysis_timeframe=analysis_tf
     )
 
-    # Calculate split index (80% in-sample, 20% out-of-sample)
+    # Calculate split index
     in_sample_pct = config["data"]["in_sample_pct"]
-    btc_split_idx = int(len(btc_1h) * in_sample_pct)
-    eth_split_idx = int(len(eth_1h) * in_sample_pct)
+    split_idx = {
+        symbol: int(len(data_analysis[symbol]) * in_sample_pct)
+        for symbol in ["BTC", "ETH"]
+    }
 
     # Split data
     in_sample_data = {
-        "BTC": btc_1h.iloc[:btc_split_idx],
-        "ETH": eth_1h.iloc[:eth_split_idx],
+        symbol: data_analysis[symbol].iloc[:split_idx[symbol]]
+        for symbol in ["BTC", "ETH"]
     }
     out_sample_data = {
-        "BTC": btc_1h.iloc[btc_split_idx:],
-        "ETH": eth_1h.iloc[eth_split_idx:],
-    }
-
-    # Split regime data
-    in_sample_regimes = {
-        "BTC": btc_aligned_regime_data.iloc[:btc_split_idx],
-        "ETH": eth_aligned_regime_data.iloc[:eth_split_idx],
-    }
-    out_sample_regimes = {
-        "BTC": btc_aligned_regime_data.iloc[btc_split_idx:],
-        "ETH": eth_aligned_regime_data.iloc[eth_split_idx:],
+        symbol: data_analysis[symbol].iloc[split_idx[symbol]:]
+        for symbol in ["BTC", "ETH"]
     }
 
     # Get target regimes from config
@@ -1221,12 +1209,15 @@ if __name__ == "__main__":
         target_regimes,
         in_sample_data,
         out_sample_data,
-        in_sample_regimes,
-        out_sample_regimes,
+        aligned_regime_data,
+        aligned_regime_data,
     )
 
     # Create results directory
     results_dir = ensure_results_dir()
+    
+    # Create timeframe identifier for filenames
+    timeframe_id = f"{analysis_tf.replace('T', 'm')}"  # converts "30T" to "30m"
     
     # Save results
     for period, results in [('in_sample', in_sample_results), ('out_sample', out_sample_results)]:
@@ -1234,14 +1225,13 @@ if __name__ == "__main__":
         csv_df = results.drop('Portfolio', axis=1).set_index(['Symbol', 'Strategy', 'Direction'])
         csv_df = csv_df.unstack(['Strategy', 'Direction'])
         
-        # Create filepath in results directory
-        filename = f"{period}_results_regimes_{'_'.join(map(str, target_regimes))}.csv"
+        # Create filepath in results directory with timeframe
+        filename = f"{period}_results_regimes_{'_'.join(map(str, target_regimes))}_{timeframe_id}.csv"
         filepath = results_dir / filename
         
         # Save the CSV
         csv_df.to_csv(filepath)
         print(f"Saved {period} results to {filepath}")
-
     # Print the date ranges for reference
 
     print(
@@ -1351,3 +1341,4 @@ if __name__ == "__main__":
             showlegend=True,
         )
         fig_out.show()
+
