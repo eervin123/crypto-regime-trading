@@ -14,6 +14,7 @@ vbt.settings.set_theme("dark")
 def rolling_mean_nb(arr, window):
     """
     Calculate the rolling mean of an array with a given window size.
+    Uses data only up to yesterday for each calculation.
 
     Parameters:
     arr (np.ndarray): Input array.
@@ -24,16 +25,18 @@ def rolling_mean_nb(arr, window):
     """
     out = np.empty_like(arr)
     for i in range(len(arr)):
-        if i < window - 1:
+        if i < window:
             out[i] = np.nan
         else:
-            out[i] = np.mean(arr[i - window + 1 : i + 1])
+            # Use data up to yesterday (i, not i+1)
+            out[i] = np.mean(arr[i - window : i])
     return out
 
 @njit
 def annualized_volatility_nb(returns, window):
     """
-    Calculate the annualized volatility of an array of returns with a given window size.
+    Calculate the annualized volatility of returns with a given window size.
+    Uses data only up to yesterday for each calculation.
 
     Parameters:
     returns (np.ndarray): Array of returns.
@@ -44,16 +47,17 @@ def annualized_volatility_nb(returns, window):
     """
     out = np.empty_like(returns)
     for i in range(len(returns)):
-        if i < window - 1:
+        if i < window:
             out[i] = np.nan
         else:
-            out[i] = np.std(returns[i - window + 1 : i + 1]) * np.sqrt(365)
+            # Use data up to yesterday (i, not i+1)
+            out[i] = np.std(returns[i - window : i]) * np.sqrt(365)
     return out
 
 @njit
 def determine_regime_nb(price, ma_short, ma_long, vol_short, avg_vol_threshold):
     """
-    Determine the market regime based on price, moving averages, and volatility.
+    Determine the market regime based on yesterday's price and indicators.
 
     Parameters:
     price (np.ndarray): Array of prices.
@@ -67,23 +71,26 @@ def determine_regime_nb(price, ma_short, ma_long, vol_short, avg_vol_threshold):
     """
     regimes = np.empty_like(price, dtype=np.int32)
     for i in range(len(price)):
-        if np.isnan(ma_short[i]) or np.isnan(ma_long[i]) or np.isnan(vol_short[i]):
+        if i == 0 or np.isnan(ma_short[i]) or np.isnan(ma_long[i]) or np.isnan(vol_short[i]):
             regimes[i] = -1  # Unknown
-        elif price[i] > ma_short[i] and price[i] > ma_long[i]:
-            if vol_short[i] > avg_vol_threshold:
-                regimes[i] = 1  # Above Avg Vol Bull Trend
-            else:
-                regimes[i] = 2  # Below Avg Vol Bull Trend
-        elif price[i] < ma_short[i] and price[i] < ma_long[i]:
-            if vol_short[i] > avg_vol_threshold:
-                regimes[i] = 5  # Above Avg Vol Bear Trend
-            else:
-                regimes[i] = 6  # Below Avg Vol Bear Trend
         else:
-            if vol_short[i] > avg_vol_threshold:
-                regimes[i] = 3  # Above Avg Vol Sideways
+            # Use yesterday's price for comparison
+            prev_price = price[i-1]
+            if prev_price > ma_short[i] and prev_price > ma_long[i]:
+                if vol_short[i] > avg_vol_threshold:
+                    regimes[i] = 1  # Above Avg Vol Bull Trend
+                else:
+                    regimes[i] = 2  # Below Avg Vol Bull Trend
+            elif prev_price < ma_short[i] and prev_price < ma_long[i]:
+                if vol_short[i] > avg_vol_threshold:
+                    regimes[i] = 5  # Above Avg Vol Bear Trend
+                else:
+                    regimes[i] = 6  # Below Avg Vol Bear Trend
             else:
-                regimes[i] = 4  # Below Avg Vol Sideways
+                if vol_short[i] > avg_vol_threshold:
+                    regimes[i] = 3  # Above Avg Vol Sideways
+                else:
+                    regimes[i] = 4  # Below Avg Vol Sideways
     return regimes
 
 @njit
@@ -91,7 +98,7 @@ def calculate_regimes_nb(
     price, returns, ma_short_window, ma_long_window, vol_short_window, avg_vol_window
 ):
     """
-    Calculate market regimes based on price, returns, and moving average and volatility parameters.
+    Calculate market regimes based on historical data only.
 
     Parameters:
     price (np.ndarray): Array of prices.
@@ -104,13 +111,17 @@ def calculate_regimes_nb(
     Returns:
     np.ndarray: Array of market regimes.
     """
+    # Calculate indicators using data up to yesterday
     ma_short = rolling_mean_nb(price, ma_short_window)
     ma_long = rolling_mean_nb(price, ma_long_window)
     vol_short = annualized_volatility_nb(returns, vol_short_window)
-    avg_vol_threshold = np.nanmean(annualized_volatility_nb(returns, avg_vol_window))
-    regimes = determine_regime_nb(
-        price, ma_short, ma_long, vol_short, avg_vol_threshold
-    )
+    
+    # Calculate average volatility threshold using historical data
+    vol_long = annualized_volatility_nb(returns, avg_vol_window)
+    avg_vol_threshold = np.nanmean(vol_long)
+    
+    # Determine regimes using yesterday's price for comparison
+    regimes = determine_regime_nb(price, ma_short, ma_long, vol_short, avg_vol_threshold)
     return regimes
 
 @njit

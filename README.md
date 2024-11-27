@@ -5,13 +5,13 @@ A framework for developing, optimizing, and backtesting multiple trading strateg
 ## Key Features
 
 - Multiple trading strategies including:
-  - Moving Average Crossover
-  - MACD Divergence
-  - RSI Divergence
-  - Bollinger Bands
-  - Parabolic SAR
-  - RSI Mean Reversion
-  - Mean Reversion
+  - Moving Average Crossover (Long/Short)
+  - MACD Divergence (Long/Short)
+  - RSI Divergence (Long/Short)
+  - Bollinger Bands (Long/Short)
+  - Parabolic SAR (Long/Short)
+  - RSI Mean Reversion (Long/Short)
+  - Mean Reversion (Long/Short)
 - Market regime classification
 - Parameter optimization using Optuna
 - Comprehensive backtesting framework

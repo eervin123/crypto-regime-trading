@@ -67,7 +67,7 @@ def load_config():
 def load_data(base_timeframe="1T", analysis_timeframe="30T", regime_timeframe="1D"):
     """
     Load and prepare BTC and ETH data at different timeframes.
-    
+
     Args:
         base_timeframe (str): Base timeframe of raw data (e.g., "1T" for 1-minute)
         analysis_timeframe (str): Main analysis timeframe (e.g., "30T", "1H", "4H")
@@ -78,15 +78,15 @@ def load_data(base_timeframe="1T", analysis_timeframe="30T", regime_timeframe="1
     # Analysis timeframe data
     data_analysis = {
         "BTC": data.resample(analysis_timeframe).data["BTCUSDT"],
-        "ETH": data.resample(analysis_timeframe).data["ETHUSDT"]
+        "ETH": data.resample(analysis_timeframe).data["ETHUSDT"],
     }
 
     # Regime timeframe data with returns
     data_regime = {
         "BTC": data.resample(regime_timeframe).data["BTCUSDT"],
-        "ETH": data.resample(regime_timeframe).data["ETHUSDT"]
+        "ETH": data.resample(regime_timeframe).data["ETHUSDT"],
     }
-    
+
     # Add returns for regime calculation
     for symbol in ["BTC", "ETH"]:
         data_regime[symbol]["Return"] = data_regime[symbol]["Close"].pct_change()
@@ -107,12 +107,17 @@ def calculate_regimes(data_regime, data_analysis, analysis_timeframe):
     RegimeIndicator = vbt.IndicatorFactory(
         class_name="RegimeIndicator",
         input_names=["price", "returns"],
-        param_names=["ma_short_window", "ma_long_window", "vol_short_window", "avg_vol_window"],
-        output_names=["regimes"]
+        param_names=[
+            "ma_short_window",
+            "ma_long_window",
+            "vol_short_window",
+            "avg_vol_window",
+        ],
+        output_names=["regimes"],
     ).with_apply_func(calculate_regimes_nb)
 
     aligned_regime_data = {}
-    
+
     for symbol in ["BTC", "ETH"]:
         # Calculate regime indicators
         regime_indicator = RegimeIndicator.run(
@@ -130,7 +135,7 @@ def calculate_regimes(data_regime, data_analysis, analysis_timeframe):
         # Resample and align regime data to analysis timeframe
         regime_data = data_regime[symbol]["Market Regime"]
         analysis_regime_data = regime_data.resample(analysis_timeframe).ffill()
-        
+
         # Align with analysis timeframe data
         aligned_regime_data[symbol] = analysis_regime_data.reindex(
             data_analysis[symbol].index, method="ffill"
@@ -165,7 +170,14 @@ def validate_timeframe_params(tf1_list, tf2_list):
         )
 
 
-def optimize_strategy(strategy_func, strategy_params, symbol_ohlcv_df, regime_data, allowed_regimes, n_trials=None):
+def optimize_strategy(
+    strategy_func,
+    strategy_params,
+    symbol_ohlcv_df,
+    regime_data,
+    allowed_regimes,
+    n_trials=None,
+):
     """
     Optimize strategy parameters using Optuna.
 
@@ -184,7 +196,7 @@ def optimize_strategy(strategy_func, strategy_params, symbol_ohlcv_df, regime_da
     # Update the n_trials parameter to use config if not specified
     if n_trials is None:
         n_trials = config["optimization"]["n_trials"]
-    
+
     # Add validation for timeframe parameters if they exist
     if "timeframe_1" in strategy_params and "timeframe_2" in strategy_params:
         validate_timeframe_params(
@@ -215,7 +227,8 @@ def optimize_strategy(strategy_func, strategy_params, symbol_ohlcv_df, regime_da
 
         # Current objective: Balance between trade frequency and returns
         # - Weights number of trades (20%) to avoid overfitting on few trades
-        objective = (pf.trades.count() * 0.20) * pf.total_return
+        # objective = (pf.trades.count() * 0.20) * pf.total_return
+        objective = pf.calmar_ratio
 
         # Alternative objectives to consider:
         # pf.total_return              # Simple returns - good for pure performance
@@ -287,7 +300,7 @@ def run_rsi_mean_reversion_strategy(
 ):
     """
     Implements an RSI mean reversion strategy with regime filtering and optional stop-loss/take-profit.
-    
+
     Args:
         symbol_ohlcv_df (pd.DataFrame): OHLCV price data
         regime_data (pd.Series): Market regime labels
@@ -369,7 +382,7 @@ def mean_reversion_strategy(
 ):
     """
     Implements a dual timeframe Bollinger Bands mean reversion strategy with regime filtering.
-    
+
     Uses VBT's optimized Bollinger Bands implementation to identify mean reversion opportunities
     across two different timeframes. Includes optional stop-loss/take-profit based on ATR.
 
@@ -664,28 +677,29 @@ def run_rsi_divergence_strategy_with_stops(
     symbol_ohlcv_df: pd.DataFrame,
     regime_data: pd.Series,
     allowed_regimes: list,
-    rsi_window: int = 14,
-    rsi_threshold: int = 30,
-    lookback_window: int = 25,
     direction: str = "long",
     use_sl_tp: bool = True,
     atr_window: int = 14,
     atr_multiplier: float = 2.0,
     fees: float = 0.001,
+    rsi_window: int = 14,
+    rsi_threshold: int = 30,
+    lookback_window: int = 20,
 ):
-    # Calculate RSI
-    rsi = vbt.RSI.run(symbol_ohlcv_df["Close"], window=rsi_window).rsi
+    """
+    Implements an RSI divergence strategy with regime filtering and optional stop-loss/take-profit.
+    """
+    rsi = vbt.RSI.run(close=symbol_ohlcv_df["Close"], window=rsi_window)
 
-    # Calculate rolling minimum for price and RSI
-    price_min = symbol_ohlcv_df["Close"].rolling(window=lookback_window).min()
-    rsi_min = rsi.rolling(window=lookback_window).min()
-
-    # Generate entry signals
+    # Determine entries
     if direction == "long":
         entries = (
-            (symbol_ohlcv_df["Close"] == price_min)
-            & (rsi < rsi_threshold)
-            & (rsi > rsi_min)
+            (
+                symbol_ohlcv_df["Close"]
+                == symbol_ohlcv_df["Close"].rolling(window=lookback_window).min()
+            )
+            & (rsi.rsi < rsi_threshold)
+            & (rsi.rsi > rsi.rsi.rolling(window=lookback_window).min())
             & (regime_data.isin(allowed_regimes))
         )
     else:  # short
@@ -694,10 +708,12 @@ def run_rsi_divergence_strategy_with_stops(
                 symbol_ohlcv_df["Close"]
                 == symbol_ohlcv_df["Close"].rolling(window=lookback_window).max()
             )
-            & (rsi > 100 - rsi_threshold)
-            & (rsi < rsi.rolling(window=lookback_window).max())
+            & (rsi.rsi > 100 - rsi_threshold)
+            & (rsi.rsi < rsi.rsi.rolling(window=lookback_window).max())
             & (regime_data.isin(allowed_regimes))
         )
+
+    regime_exits = ~regime_data.isin(allowed_regimes)
 
     pf_kwargs = {
         "close": symbol_ohlcv_df["Close"],
@@ -718,6 +734,8 @@ def run_rsi_divergence_strategy_with_stops(
         if direction == "long":
             pf_kwargs.update(
                 {
+                    "entries": entries,
+                    "exits": regime_exits,
                     "sl_stop": symbol_ohlcv_df["Close"] - atr_multiplier * atr,
                     "tp_stop": symbol_ohlcv_df["Close"] + atr_multiplier * atr,
                     "delta_format": "target",
@@ -726,25 +744,20 @@ def run_rsi_divergence_strategy_with_stops(
         else:
             pf_kwargs.update(
                 {
+                    "short_entries": entries,
+                    "short_exits": regime_exits,
                     "sl_stop": symbol_ohlcv_df["Close"] + atr_multiplier * atr,
                     "tp_stop": symbol_ohlcv_df["Close"] - atr_multiplier * atr,
                     "delta_format": "target",
                 }
             )
-
-    if direction == "long":
-        pf_kwargs.update(
-            {"entries": entries, "exits": ~regime_data.isin(allowed_regimes)}
-        )
     else:
-        pf_kwargs.update(
-            {
-                "short_entries": entries,
-                "short_exits": ~regime_data.isin(allowed_regimes),
-            }
-        )
+        if direction == "long":
+            pf_kwargs.update({"entries": entries, "exits": regime_exits})
+        else:
+            pf_kwargs.update({"short_entries": entries, "short_exits": regime_exits})
 
-    return vbt.PF.from_signals(**pf_kwargs)
+    return vbt.Portfolio.from_signals(**pf_kwargs)
 
 
 def run_psar_strategy_with_stops(
@@ -988,42 +1001,45 @@ def ensure_results_dir():
     """Create results directory and subdirectories if they don't exist."""
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Create params subdirectory
     params_dir = results_dir / "params"
     params_dir.mkdir(exist_ok=True)
-    
+
     # Create backtests subdirectory
     backtests_dir = results_dir / "backtests"
     backtests_dir.mkdir(exist_ok=True)
-    
+
     return results_dir, params_dir, backtests_dir
+
 
 def save_optimal_params(in_sample_results, timeframe_id, target_regimes, config):
     """
     Save optimal parameters for each strategy to JSON files with config metadata.
     """
     # Get the params directory
-    results_dir, params_dir, _ = ensure_results_dir()  # Now properly unpacking the tuple
-    
+    results_dir, params_dir, _ = (
+        ensure_results_dir()
+    )  # Now properly unpacking the tuple
+
     # Strategy name mapping between results and config
     strategy_config_mapping = {
-        'Bollinger Bands (Long)': 'bbands',
-        'Bollinger Bands (Short)': 'bbands',
-        'Moving Average (Long)': 'ma',
-        'Moving Average (Short)': 'ma',
-        'MACD Divergence (Long)': 'macd',
-        'MACD Divergence (Short)': 'macd',
-        'RSI Divergence (Long)': 'rsi',
-        'RSI Divergence (Short)': 'rsi',
-        'Parabolic SAR (Long)': 'psar',
-        'Parabolic SAR (Short)': 'psar',
-        'RSI Mean Reversion (Long)': 'rsi_mean_reversion',
-        'RSI Mean Reversion (Short)': 'rsi_mean_reversion',
-        'Mean Reversion (Long)': 'mean_reversion',
-        'Mean Reversion (Short)': 'mean_reversion'
+        "Bollinger Bands (Long)": "bbands",
+        "Bollinger Bands (Short)": "bbands",
+        "Moving Average (Long)": "ma",
+        "Moving Average (Short)": "ma",
+        "MACD Divergence (Long)": "macd",
+        "MACD Divergence (Short)": "macd",
+        "RSI Divergence (Long)": "rsi",
+        "RSI Divergence (Short)": "rsi",
+        "Parabolic SAR (Long)": "psar",
+        "Parabolic SAR (Short)": "psar",
+        "RSI Mean Reversion (Long)": "rsi_mean_reversion",
+        "RSI Mean Reversion (Short)": "rsi_mean_reversion",
+        "Mean Reversion (Long)": "mean_reversion",
+        "Mean Reversion (Short)": "mean_reversion",
     }
-    
+
     # Create metadata about this optimization run
     metadata = {
         "optimization_date": datetime.now().strftime("%Y-%m-%d"),
@@ -1034,73 +1050,95 @@ def save_optimal_params(in_sample_results, timeframe_id, target_regimes, config)
             "ma_long_window": config["regime"]["ma_long_window"],
             "vol_short_window": config["regime"]["vol_short_window"],
             "avg_vol_window": config["regime"]["avg_vol_window"],
-            "target_regimes": target_regimes
+            "target_regimes": target_regimes,
         },
         "data_settings": config["data"],
-        "analysis_timeframe": timeframe_id
+        "analysis_timeframe": timeframe_id,
     }
-    
+
     # Group results by Symbol and Strategy (without direction)
     # First, clean strategy names to remove direction
-    in_sample_results['Base Strategy'] = in_sample_results['Strategy'].apply(
-        lambda x: x.split(' (')[0]
+    in_sample_results["Base Strategy"] = in_sample_results["Strategy"].apply(
+        lambda x: x.split(" (")[0]
     )
-    
-    grouped = in_sample_results.groupby(['Symbol', 'Base Strategy'])
-    
+
+    grouped = in_sample_results.groupby(["Symbol", "Base Strategy"])
+
     for (symbol, strategy), group in grouped:
         # Get the correct strategy name for config lookup
-        strategy_config_name = strategy_config_mapping.get(f"{strategy} (Long)")  # Use either Long or Short version
+        strategy_config_name = strategy_config_mapping.get(
+            f"{strategy} (Long)"
+        )  # Use either Long or Short version
         if strategy_config_name is None:
             print(f"Warning: No config mapping found for strategy {strategy}")
             continue
-            
+
         # Get parameter columns (exclude metrics and metadata)
-        param_cols = [col for col in group.columns if col not in [
-            'Symbol', 'Strategy', 'Base Strategy', 'Direction', 'Portfolio',
-            'Total Return', 'Sharpe Ratio', 'Sortino Ratio',
-            'Win Rate', 'Max Drawdown', 'Calmar Ratio',
-            'Omega Ratio', 'Profit Factor', 'Expectancy',
-            'Total Trades'
-        ]]
-        
+        param_cols = [
+            col
+            for col in group.columns
+            if col
+            not in [
+                "Symbol",
+                "Strategy",
+                "Base Strategy",
+                "Direction",
+                "Portfolio",
+                "Total Return",
+                "Sharpe Ratio",
+                "Sortino Ratio",
+                "Win Rate",
+                "Max Drawdown",
+                "Calmar Ratio",
+                "Omega Ratio",
+                "Profit Factor",
+                "Expectancy",
+                "Total Trades",
+            ]
+        ]
+
         params_dict = {
             "long": None,
             "short": None,
             "metadata": metadata,
-            "strategy_params": config["strategy_params"][strategy_config_name]
+            "strategy_params": config["strategy_params"][strategy_config_name],
         }
-        
+
         # Check for long direction results
-        long_results = group[group['Direction'] == 'long']
-        if not long_results.empty and long_results['Total Return'].iloc[0] > 0:
-            params_dict['long'] = long_results[param_cols].to_dict('records')[0]
+        long_results = group[group["Direction"] == "long"]
+        if not long_results.empty and long_results["Total Return"].iloc[0] > 0:
+            params_dict["long"] = long_results[param_cols].to_dict("records")[0]
         else:
             print(f"Warning: No valid long results for {symbol} {strategy}")
-            
+
         # Check for short direction results
-        short_results = group[group['Direction'] == 'short']
-        if not short_results.empty and short_results['Total Return'].iloc[0] > 0:
-            params_dict['short'] = short_results[param_cols].to_dict('records')[0]
+        short_results = group[group["Direction"] == "short"]
+        if not short_results.empty and short_results["Total Return"].iloc[0] > 0:
+            params_dict["short"] = short_results[param_cols].to_dict("records")[0]
         else:
             print(f"Warning: No valid short results for {symbol} {strategy}")
-        
+
         # Only save if we have at least one valid direction
-        if params_dict['long'] is not None or params_dict['short'] is not None:
+        if params_dict["long"] is not None or params_dict["short"] is not None:
             # Create filename with regime info
-            strategy_name = strategy.lower().replace(' ', '_')
-            regime_str = '_'.join(map(str, target_regimes))
-            filename = (f"{symbol.lower()}_{strategy_name}_params"
-                      f"_regimes_{regime_str}"
-                      f"_tf_{timeframe_id}.json")
-            
+            strategy_name = strategy.lower().replace(" ", "_")
+            regime_str = "_".join(map(str, target_regimes))
+            filename = (
+                f"{symbol.lower()}_{strategy_name}_params"
+                f"_regimes_{regime_str}"
+                f"_tf_{timeframe_id}.json"
+            )
+
             # Save to JSON
-            with open(params_dir / filename, 'w') as f:
+            with open(params_dir / filename, "w") as f:
                 json.dump(params_dict, indent=4, default=str, fp=f)
-            
+
             print(f"Saved optimal parameters for {symbol} {strategy} to {filename}")
         else:
-            print(f"Skipping {symbol} {strategy} - no valid results for either direction")
+            print(
+                f"Skipping {symbol} {strategy} - no valid results for either direction"
+            )
+
 
 def run_optimized_strategies(
     target_regimes,
@@ -1162,8 +1200,10 @@ def run_optimized_strategies(
                 )
 
     # After optimization but before out-of-sample testing, save the parameters
-    timeframe_id = analysis_tf.replace('T', 'm')
-    save_optimal_params(pd.DataFrame(in_sample_results), timeframe_id, target_regimes, config)
+    timeframe_id = analysis_tf.replace("T", "m")
+    save_optimal_params(
+        pd.DataFrame(in_sample_results), timeframe_id, target_regimes, config
+    )
 
     # Test optimized parameters on out-of-sample data
     out_sample_results = []
@@ -1249,22 +1289,24 @@ def format_results_table(results_df):
 
     # Create new DataFrame with strategies as columns
     formatted_df = pd.DataFrame()
-    
+
     for _, row in results_df.iterrows():
         strategy_name = f"{row['Strategy']} ({row['Direction']})"
-        
+
         # Create a series for this strategy's data
-        strategy_data = pd.Series(dtype='object')
-        
+        strategy_data = pd.Series(dtype="object")
+
         # Add metrics with corrected Total Return formatting
-        strategy_data["Total Return"] = f"{row['Total Return'] * 100:.2f}%"  # Convert decimal to percentage
+        strategy_data["Total Return"] = (
+            f"{row['Total Return'] * 100:.2f}%"  # Convert decimal to percentage
+        )
         strategy_data["Win Rate"] = f"{row['Win Rate']:.2%}"
         strategy_data["Max Drawdown"] = f"{row['Max Drawdown']:.2%}"
         strategy_data["Sharpe Ratio"] = f"{row['Sharpe Ratio']:.2f}"
         strategy_data["Sortino Ratio"] = f"{row['Sortino Ratio']:.2f}"
         strategy_data["Calmar Ratio"] = f"{row['Calmar Ratio']:.2f}"
         strategy_data["Total Trades"] = f"{row['Total Trades']:.0f}"
-        
+
         # Add parameters
         for param in param_rows:
             value = row[param]
@@ -1274,7 +1316,7 @@ def format_results_table(results_df):
                 strategy_data[f"param_{param}"] = f"{value:.0f}"
             else:
                 strategy_data[f"param_{param}"] = str(value)
-        
+
         # Add this strategy as a new column
         formatted_df[strategy_name] = strategy_data
 
@@ -1284,7 +1326,7 @@ def format_results_table(results_df):
 if __name__ == "__main__":
     # Load config
     config = load_config()
-    
+
     # Get timeframes from config
     base_tf = config["timeframes"]["base"]  # e.g., "1T"
     analysis_tf = config["timeframes"]["analysis"]  # e.g., "30T"
@@ -1294,14 +1336,12 @@ if __name__ == "__main__":
     data_analysis, data_regime = load_data(
         base_timeframe=base_tf,
         analysis_timeframe=analysis_tf,
-        regime_timeframe=regime_tf
+        regime_timeframe=regime_tf,
     )
-    
+
     # Calculate regimes
     aligned_regime_data = calculate_regimes(
-        data_regime, 
-        data_analysis,
-        analysis_timeframe=analysis_tf
+        data_regime, data_analysis, analysis_timeframe=analysis_tf
     )
 
     # Calculate split index
@@ -1313,11 +1353,11 @@ if __name__ == "__main__":
 
     # Split data
     in_sample_data = {
-        symbol: data_analysis[symbol].iloc[:split_idx[symbol]]
+        symbol: data_analysis[symbol].iloc[: split_idx[symbol]]
         for symbol in ["BTC", "ETH"]
     }
     out_sample_data = {
-        symbol: data_analysis[symbol].iloc[split_idx[symbol]:]
+        symbol: data_analysis[symbol].iloc[split_idx[symbol] :]
         for symbol in ["BTC", "ETH"]
     }
 
@@ -1335,20 +1375,25 @@ if __name__ == "__main__":
 
     # Create results directory and get subdirectories
     results_dir, params_dir, backtests_dir = ensure_results_dir()
-    
+
     # Create timeframe identifier for filenames
     timeframe_id = f"{analysis_tf.replace('T', 'm')}"
-    
+
     # Save results
-    for period, results in [('in_sample', in_sample_results), ('out_sample', out_sample_results)]:
+    for period, results in [
+        ("in_sample", in_sample_results),
+        ("out_sample", out_sample_results),
+    ]:
         # Save to CSV with strategies as columns
-        csv_df = results.drop('Portfolio', axis=1).set_index(['Symbol', 'Strategy', 'Direction'])
-        csv_df = csv_df.unstack(['Strategy', 'Direction'])
-        
+        csv_df = results.drop("Portfolio", axis=1).set_index(
+            ["Symbol", "Strategy", "Direction"]
+        )
+        csv_df = csv_df.unstack(["Strategy", "Direction"])
+
         # Create filepath in backtests directory with timeframe
         filename = f"{period}_results_regimes_{'_'.join(map(str, target_regimes))}_{timeframe_id}.csv"
         filepath = backtests_dir / filename
-        
+
         # Save the CSV
         csv_df.to_csv(filepath)
         print(f"Saved {period} results to {filepath}")
@@ -1461,4 +1506,3 @@ if __name__ == "__main__":
             showlegend=True,
         )
         fig_out.show()
-

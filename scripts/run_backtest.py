@@ -24,7 +24,7 @@ from optuna_multistrat import (
 STRATEGY_PARAMS = {
     'Moving Average': {
         'function': run_ma_strategy,
-        'required_params': ['fast_window', 'slow_window', 'direction', 'use_sl_tp', 'atr_window', 'atr_multiplier']  # Updated to match optuna version
+        'required_params': ['fast_ma', 'slow_ma', 'direction', 'use_sl_tp', 'atr_window', 'atr_multiplier']
     },
     'MACD Divergence': {
         'function': run_macd_strategy,
@@ -161,7 +161,9 @@ def run_full_backtest(symbol, timeframe, target_regimes):
                     # Extract only the relevant parameters for this strategy
                     required_params = strategy_info['required_params']
                     filtered_params = {
-                        k: int(v) if isinstance(v, (float, np.float64)) and ('window' in k or k.endswith('_ma'))
+                        k: int(v) if isinstance(v, (float, np.float64)) and (
+                            'window' in k or k.endswith('_ma') or k in ['fast_ma', 'slow_ma']
+                        )
                         else float(v) if isinstance(v, (float, np.float64))
                         else v
                         for k, v in strategy_params.items()
@@ -224,6 +226,20 @@ if __name__ == "__main__":
     # Ensure results directory exists
     backtests_dir = ensure_results_dir()
     
+    # Load and prepare data
+    data_analysis, data_regime = load_data(
+        base_timeframe=config["timeframes"]["base"],
+        analysis_timeframe=config["timeframes"]["analysis"],
+        regime_timeframe=config["timeframes"]["regime"]
+    )
+    
+    # Calculate regimes
+    aligned_regime_data = calculate_regimes(
+        data_regime, 
+        data_analysis,
+        analysis_timeframe=config["timeframes"]["analysis"]
+    )
+    
     results_all = []
     equity_curves_all = {}
     
@@ -248,31 +264,89 @@ if __name__ == "__main__":
         print("=" * 80)
         print(combined_results.to_string())
         
-        # Create subplots for visualization
+        # Create equity curves DataFrame with benchmarks and regimes
+        equity_curves_df = pd.DataFrame(equity_curves_all)
+        
+        # Add benchmark prices (normalized to start at 1)
+        for symbol in ["BTC", "ETH"]:
+            close_prices = data_analysis[symbol]["Close"]
+            normalized_prices = close_prices / close_prices.iloc[0]
+            equity_curves_df[f"{symbol}_Benchmark"] = normalized_prices
+            
+            # Add regime data
+            equity_curves_df[f"{symbol}_Regime"] = aligned_regime_data[symbol]
+        
+        # Save equity curves with benchmarks and regimes
+        equity_curves_file = backtests_dir / f"equity_curves_regimes_{'_'.join(map(str, target_regimes))}_{timeframe}.csv"
+        equity_curves_df.to_csv(equity_curves_file)
+        print(f"\nEquity curves saved to: {equity_curves_file}")
+        
+        # Update visualization to group by symbol
         n_strategies = len(STRATEGY_PARAMS)
+        
+        # Create subplot titles including benchmarks
+        subplot_titles = []
+        for i in range(n_strategies):
+            strategy = list(STRATEGY_PARAMS.keys())[i]
+            subplot_titles.extend([
+                f"BTC {strategy}",  # Column 1
+                f"ETH {strategy}"   # Column 2
+            ])
+        subplot_titles.extend(["BTC Benchmark", "ETH Benchmark"])  # Add benchmark titles
+        
         fig = vbt.make_subplots(
-            rows=n_strategies,
-            cols=1,
-            subplot_titles=[s for s in STRATEGY_PARAMS.keys()],
-            vertical_spacing=0.05
+            rows=n_strategies + 1,  # Add one more row for benchmarks
+            cols=2,  # One column for each symbol
+            subplot_titles=subplot_titles,
+            vertical_spacing=0.05,
+            horizontal_spacing=0.1
         )
         
-        # Plot results by strategy
+        # Plot strategy results by symbol and strategy
         for i, strategy in enumerate(STRATEGY_PARAMS.keys(), 1):
-            strategy_curves = pd.DataFrame({
+            # Plot BTC (column 1)
+            btc_curves = pd.DataFrame({
                 name: curve 
                 for name, curve in equity_curves_all.items() 
-                if f"_{strategy}_" in name
+                if f"BTC_{strategy}_" in name
             })
             
-            if not strategy_curves.empty:
-                strategy_curves.vbt.plot(
+            if not btc_curves.empty:
+                btc_curves.vbt.plot(
                     add_trace_kwargs=dict(row=i, col=1),
                     fig=fig
                 )
+            
+            # Plot ETH (column 2)
+            eth_curves = pd.DataFrame({
+                name: curve 
+                for name, curve in equity_curves_all.items() 
+                if f"ETH_{strategy}_" in name
+            })
+            
+            if not eth_curves.empty:
+                eth_curves.vbt.plot(
+                    add_trace_kwargs=dict(row=i, col=2),
+                    fig=fig
+                )
+        
+        # Plot benchmarks in the last row
+        pd.DataFrame({
+            "BTC": equity_curves_df["BTC_Benchmark"]
+        }).vbt.plot(
+            add_trace_kwargs=dict(row=n_strategies + 1, col=1),
+            fig=fig
+        )
+        
+        pd.DataFrame({
+            "ETH": equity_curves_df["ETH_Benchmark"]
+        }).vbt.plot(
+            add_trace_kwargs=dict(row=n_strategies + 1, col=2),
+            fig=fig
+        )
         
         fig.update_layout(
-            height=300 * n_strategies,
+            height=300 * (n_strategies + 1),  # Adjust height for benchmark row
             title="Strategy Performance by Symbol",
             showlegend=True
         )
