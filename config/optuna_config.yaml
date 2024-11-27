@@ -85,5 +85,5 @@ regime:
 
 timeframes:
   base: "1T"
-  analysis: "90T"
+  analysis: "60T"
   regime: "1D"

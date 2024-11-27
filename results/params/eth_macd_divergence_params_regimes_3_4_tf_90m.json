@@ -6,23 +6,45 @@
         "use_sl_tp": true,
         "atr_window": 5,
         "atr_multiplier": 10.0,
-        "fast_window": NaN,
-        "slow_window": NaN,
-        "signal_window": NaN,
+        "fast_window": 5.0,
+        "slow_window": 10.0,
+        "signal_window": 5.0,
         "rsi_window": NaN,
         "rsi_threshold": NaN,
         "lookback_window": NaN,
         "bb_window": NaN,
         "bb_alpha": NaN,
-        "af0": 0.01,
-        "af_increment": 0.1,
-        "max_af": 0.5,
+        "af0": NaN,
+        "af_increment": NaN,
+        "max_af": NaN,
         "rsi_lower": NaN,
         "rsi_upper": NaN,
         "timeframe_1": NaN,
         "timeframe_2": NaN
     },
-    "short": null,
+    "short": {
+        "fast_ma": NaN,
+        "slow_ma": NaN,
+        "direction": "short",
+        "use_sl_tp": true,
+        "atr_window": 50,
+        "atr_multiplier": 0.5,
+        "fast_window": 100.0,
+        "slow_window": 300.0,
+        "signal_window": 50.0,
+        "rsi_window": NaN,
+        "rsi_threshold": NaN,
+        "lookback_window": NaN,
+        "bb_window": NaN,
+        "bb_alpha": NaN,
+        "af0": NaN,
+        "af_increment": NaN,
+        "max_af": NaN,
+        "rsi_lower": NaN,
+        "rsi_upper": NaN,
+        "timeframe_1": NaN,
+        "timeframe_2": NaN
+    },
     "metadata": {
         "optimization_date": "2024-11-26",
         "optimization_settings": {
@@ -43,8 +65,8 @@
             "vol_short_window": 21,
             "avg_vol_window": 365,
             "target_regimes": [
-                1,
-                2
+                3,
+                4
             ]
         },
         "data_settings": {
@@ -54,17 +76,17 @@
         "analysis_timeframe": "90m"
     },
     "strategy_params": {
-        "af0": [
-            0.01,
-            0.1
+        "fast_window": [
+            5,
+            100
         ],
-        "af_increment": [
-            0.01,
-            0.1
+        "slow_window": [
+            10,
+            300
         ],
-        "max_af": [
-            0.1,
-            0.5
+        "signal_window": [
+            5,
+            50
         ],
         "direction": [
             "long",
