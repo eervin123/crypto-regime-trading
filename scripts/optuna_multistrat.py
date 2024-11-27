@@ -39,6 +39,8 @@ import plotly.io as pio
 import numpy as np
 import yaml
 from pathlib import Path
+import json
+from datetime import datetime
 
 # Set the default renderer to 'browser' to open plots in your default web browser
 pio.renderers.default = "browser"
@@ -982,6 +984,124 @@ def create_stats(name, symbol, direction, pf, params):
     }
 
 
+def ensure_results_dir():
+    """Create results directory and subdirectories if they don't exist."""
+    results_dir = Path("results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create params subdirectory
+    params_dir = results_dir / "params"
+    params_dir.mkdir(exist_ok=True)
+    
+    # Create backtests subdirectory
+    backtests_dir = results_dir / "backtests"
+    backtests_dir.mkdir(exist_ok=True)
+    
+    return results_dir, params_dir, backtests_dir
+
+def save_optimal_params(in_sample_results, timeframe_id, target_regimes, config):
+    """
+    Save optimal parameters for each strategy to JSON files with config metadata.
+    """
+    # Get the params directory
+    results_dir, params_dir, _ = ensure_results_dir()  # Now properly unpacking the tuple
+    
+    # Strategy name mapping between results and config
+    strategy_config_mapping = {
+        'Bollinger Bands (Long)': 'bbands',
+        'Bollinger Bands (Short)': 'bbands',
+        'Moving Average (Long)': 'ma',
+        'Moving Average (Short)': 'ma',
+        'MACD Divergence (Long)': 'macd',
+        'MACD Divergence (Short)': 'macd',
+        'RSI Divergence (Long)': 'rsi',
+        'RSI Divergence (Short)': 'rsi',
+        'Parabolic SAR (Long)': 'psar',
+        'Parabolic SAR (Short)': 'psar',
+        'RSI Mean Reversion (Long)': 'rsi_mean_reversion',
+        'RSI Mean Reversion (Short)': 'rsi_mean_reversion',
+        'Mean Reversion (Long)': 'mean_reversion',
+        'Mean Reversion (Short)': 'mean_reversion'
+    }
+    
+    # Create metadata about this optimization run
+    metadata = {
+        "optimization_date": datetime.now().strftime("%Y-%m-%d"),
+        "optimization_settings": config["optimization"],
+        "timeframes": config["timeframes"],
+        "regime_settings": {
+            "ma_short_window": config["regime"]["ma_short_window"],
+            "ma_long_window": config["regime"]["ma_long_window"],
+            "vol_short_window": config["regime"]["vol_short_window"],
+            "avg_vol_window": config["regime"]["avg_vol_window"],
+            "target_regimes": target_regimes
+        },
+        "data_settings": config["data"],
+        "analysis_timeframe": timeframe_id
+    }
+    
+    # Group results by Symbol and Strategy (without direction)
+    # First, clean strategy names to remove direction
+    in_sample_results['Base Strategy'] = in_sample_results['Strategy'].apply(
+        lambda x: x.split(' (')[0]
+    )
+    
+    grouped = in_sample_results.groupby(['Symbol', 'Base Strategy'])
+    
+    for (symbol, strategy), group in grouped:
+        # Get the correct strategy name for config lookup
+        strategy_config_name = strategy_config_mapping.get(f"{strategy} (Long)")  # Use either Long or Short version
+        if strategy_config_name is None:
+            print(f"Warning: No config mapping found for strategy {strategy}")
+            continue
+            
+        # Get parameter columns (exclude metrics and metadata)
+        param_cols = [col for col in group.columns if col not in [
+            'Symbol', 'Strategy', 'Base Strategy', 'Direction', 'Portfolio',
+            'Total Return', 'Sharpe Ratio', 'Sortino Ratio',
+            'Win Rate', 'Max Drawdown', 'Calmar Ratio',
+            'Omega Ratio', 'Profit Factor', 'Expectancy',
+            'Total Trades'
+        ]]
+        
+        params_dict = {
+            "long": None,
+            "short": None,
+            "metadata": metadata,
+            "strategy_params": config["strategy_params"][strategy_config_name]
+        }
+        
+        # Check for long direction results
+        long_results = group[group['Direction'] == 'long']
+        if not long_results.empty and long_results['Total Return'].iloc[0] > 0:
+            params_dict['long'] = long_results[param_cols].to_dict('records')[0]
+        else:
+            print(f"Warning: No valid long results for {symbol} {strategy}")
+            
+        # Check for short direction results
+        short_results = group[group['Direction'] == 'short']
+        if not short_results.empty and short_results['Total Return'].iloc[0] > 0:
+            params_dict['short'] = short_results[param_cols].to_dict('records')[0]
+        else:
+            print(f"Warning: No valid short results for {symbol} {strategy}")
+        
+        # Only save if we have at least one valid direction
+        if params_dict['long'] is not None or params_dict['short'] is not None:
+            # Create filename with regime info
+            strategy_name = strategy.lower().replace(' ', '_')
+            regime_str = '_'.join(map(str, target_regimes))
+            filename = (f"{symbol.lower()}_{strategy_name}_params"
+                      f"_regimes_{regime_str}"
+                      f"_tf_{timeframe_id}.json")
+            
+            # Save to JSON
+            with open(params_dir / filename, 'w') as f:
+                json.dump(params_dict, indent=4, default=str, fp=f)
+            
+            print(f"Saved optimal parameters for {symbol} {strategy} to {filename}")
+        else:
+            print(f"Skipping {symbol} {strategy} - no valid results for either direction")
+
 def run_optimized_strategies(
     target_regimes,
     in_sample_data,
@@ -1018,6 +1138,12 @@ def run_optimized_strategies(
                 target_regimes,
             )
 
+            # Only add if strategy produced valid results
+            if long_pf.total_return > 0:
+                in_sample_results.append(
+                    create_stats(name, symbol, "long", long_pf, best_long_params)
+                )
+
             # Optimize for short
             short_params = params.copy()
             short_params["direction"] = ["short"]
@@ -1029,13 +1155,15 @@ def run_optimized_strategies(
                 target_regimes,
             )
 
-            # Create stats for both
-            in_sample_results.extend(
-                [
-                    create_stats(name, symbol, "long", long_pf, best_long_params),
-                    create_stats(name, symbol, "short", short_pf, best_short_params),
-                ]
-            )
+            # Only add if strategy produced valid results
+            if short_pf.total_return > 0:
+                in_sample_results.append(
+                    create_stats(name, symbol, "short", short_pf, best_short_params)
+                )
+
+    # After optimization but before out-of-sample testing, save the parameters
+    timeframe_id = analysis_tf.replace('T', 'm')
+    save_optimal_params(pd.DataFrame(in_sample_results), timeframe_id, target_regimes, config)
 
     # Test optimized parameters on out-of-sample data
     out_sample_results = []
@@ -1153,14 +1281,6 @@ def format_results_table(results_df):
     return formatted_df
 
 
-# Add this function after the imports
-def ensure_results_dir():
-    """Create results directory if it doesn't exist."""
-    results_dir = Path("results")
-    results_dir.mkdir(parents=True, exist_ok=True)
-    return results_dir
-
-
 if __name__ == "__main__":
     # Load config
     config = load_config()
@@ -1213,11 +1333,11 @@ if __name__ == "__main__":
         aligned_regime_data,
     )
 
-    # Create results directory
-    results_dir = ensure_results_dir()
+    # Create results directory and get subdirectories
+    results_dir, params_dir, backtests_dir = ensure_results_dir()
     
     # Create timeframe identifier for filenames
-    timeframe_id = f"{analysis_tf.replace('T', 'm')}"  # converts "30T" to "30m"
+    timeframe_id = f"{analysis_tf.replace('T', 'm')}"
     
     # Save results
     for period, results in [('in_sample', in_sample_results), ('out_sample', out_sample_results)]:
@@ -1225,9 +1345,9 @@ if __name__ == "__main__":
         csv_df = results.drop('Portfolio', axis=1).set_index(['Symbol', 'Strategy', 'Direction'])
         csv_df = csv_df.unstack(['Strategy', 'Direction'])
         
-        # Create filepath in results directory with timeframe
+        # Create filepath in backtests directory with timeframe
         filename = f"{period}_results_regimes_{'_'.join(map(str, target_regimes))}_{timeframe_id}.csv"
-        filepath = results_dir / filename
+        filepath = backtests_dir / filename
         
         # Save the CSV
         csv_df.to_csv(filepath)

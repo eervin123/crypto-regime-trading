@@ -40,15 +40,14 @@ def volatility_breakout(
         atr_multiplier (float): Multiplier for ATR-based stops
         fees (float): Trading fees
     """
-    # Calculate True Range using tr_nb
-    tr = pd.Series(
-        vbt.tr_nb(
-            symbol_ohlcv_df['High'].values,
-            symbol_ohlcv_df['Low'].values,
-            symbol_ohlcv_df['Close'].values
-        ),
-        index=symbol_ohlcv_df.index
+    # Calculate True Range using ATR
+    atr = vbt.ATR.run(
+        symbol_ohlcv_df['High'],
+        symbol_ohlcv_df['Low'],
+        symbol_ohlcv_df['Close'],
+        window=1  # Use a window of 1 to get the true range
     )
+    tr = atr.atr  # This gives us the true range
     
     avg_tr = tr.rolling(window=lookback_window).mean()
     current_tr = tr / avg_tr

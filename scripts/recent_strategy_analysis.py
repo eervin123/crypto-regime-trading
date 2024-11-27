@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 # Import strategy functions and regimes from your main file
-from regimes_multi_strat_pf import (
+from scripts.regimes_multi_strat_pf import (
     run_bbands_strategy,
     run_ma_strategy,
     run_rsi_divergence_strategy,

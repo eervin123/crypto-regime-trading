@@ -91,30 +91,110 @@ def calculate_regimes_nb(
     price, returns, ma_short_window, ma_long_window, vol_short_window, avg_vol_window
 ):
     """
-    Calculate market regimes based on price, returns, and moving average and volatility parameters.
+    Calculate market regimes based on price action and volatility metrics.
+    Uses previous day's data to determine current day's regime to avoid look-ahead bias.
 
     Parameters:
-    price (np.ndarray): Array of prices.
-    returns (np.ndarray): Array of returns.
-    ma_short_window (int): Window size for the short moving average.
-    ma_long_window (int): Window size for the long moving average.
-    vol_short_window (int): Window size for the short volatility calculation.
-    avg_vol_window (int): Window size for the average volatility calculation.
+    -----------
+    price : np.ndarray
+        Array of prices
+    returns : np.ndarray
+        Array of returns
+    ma_short_window : int
+        Window size for short moving average
+    ma_long_window : int
+        Window size for long moving average
+    vol_short_window : int
+        Window size for volatility calculation
+    avg_vol_window : int
+        Window size for average volatility calculation
 
     Returns:
-    np.ndarray: Array of market regimes.
+    --------
+    np.ndarray
+        Array of market regimes:
+        -1: Unknown
+        1: Above Avg Vol Bull Trend
+        2: Below Avg Vol Bull Trend
+        3: Above Avg Vol Sideways
+        4: Below Avg Vol Sideways
+        5: Above Avg Vol Bear Trend
+        6: Below Avg Vol Bear Trend
     """
     ma_short = rolling_mean_nb(price, ma_short_window)
     ma_long = rolling_mean_nb(price, ma_long_window)
     vol_short = annualized_volatility_nb(returns, vol_short_window)
-    avg_vol_threshold = np.nanmean(annualized_volatility_nb(returns, avg_vol_window))
-    regimes = determine_regime_nb(
-        price, ma_short, ma_long, vol_short, avg_vol_threshold
-    )
+    
+    # Calculate average volatility using data up to previous day only
+    avg_vol = np.empty_like(returns)
+    for i in range(len(returns)):
+        if i < avg_vol_window:
+            avg_vol[i] = np.nan
+        else:
+            # Use data up to previous day to calculate threshold
+            avg_vol[i] = np.nanmean(vol_short[max(0, i-avg_vol_window):i])
+    
+    regimes = np.empty_like(price, dtype=np.int32)
+    
+    # First day will be unknown
+    regimes[0] = -1
+    
+    # For each day, use previous day's data to determine regime
+    for i in range(1, len(price)):
+        if i < avg_vol_window or np.isnan(ma_short[i-1]) or np.isnan(ma_long[i-1]) or np.isnan(vol_short[i-1]) or np.isnan(avg_vol[i-1]):
+            regimes[i] = -1  # Unknown
+        elif price[i-1] > ma_short[i-1] and price[i-1] > ma_long[i-1]:
+            if vol_short[i-1] > avg_vol[i-1]:
+                regimes[i] = 1  # Above Avg Vol Bull Trend
+            else:
+                regimes[i] = 2  # Below Avg Vol Bull Trend
+        elif price[i-1] < ma_short[i-1] and price[i-1] < ma_long[i-1]:
+            if vol_short[i-1] > avg_vol[i-1]:
+                regimes[i] = 5  # Above Avg Vol Bear Trend
+            else:
+                regimes[i] = 6  # Below Avg Vol Bear Trend
+        else:
+            if vol_short[i-1] > avg_vol[i-1]:
+                regimes[i] = 3  # Above Avg Vol Sideways
+            else:
+                regimes[i] = 4  # Below Avg Vol Sideways
     return regimes
 
 @njit
 def psar_nb_with_next(high, low, close, af0=0.02, af_increment=0.02, max_af=0.2):
+    """
+    Calculate Parabolic SAR (Stop And Reverse) values including next-period predictions.
+    
+    This implementation includes both current PSAR values and predicted values for the
+    next period, which can be used for generating trading signals. The function is optimized
+    using Numba for performance.
+
+    Parameters:
+    -----------
+    high : np.ndarray
+        Array of high prices
+    low : np.ndarray
+        Array of low prices
+    close : np.ndarray
+        Array of closing prices
+    af0 : float, optional
+        Initial acceleration factor, default 0.02
+    af_increment : float, optional
+        Acceleration factor increment, default 0.02
+    max_af : float, optional
+        Maximum acceleration factor, default 0.2
+
+    Returns:
+    --------
+    tuple
+        (long, short, af, reversal, next_long, next_short)
+        - long: np.ndarray - PSAR values for long positions
+        - short: np.ndarray - PSAR values for short positions
+        - af: np.ndarray - Acceleration factors
+        - reversal: np.ndarray - Reversal signals (0 or 1)
+        - next_long: np.ndarray - Predicted next-period PSAR for long positions
+        - next_short: np.ndarray - Predicted next-period PSAR for short positions
+    """
     length = len(high)
     long = np.full(length, np.nan)
     short = np.full(length, np.nan)
