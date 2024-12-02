@@ -1,0 +1,81 @@
+{
+    "long": {
+        "fast_ma": 51.0,
+        "slow_ma": 198.0,
+        "use_sl_tp": false,
+        "atr_window": 8,
+        "atr_multiplier": 17.33690530092121,
+        "direction": "long",
+        "fast_window": NaN,
+        "slow_window": NaN,
+        "signal_window": NaN,
+        "rsi_window": NaN,
+        "rsi_threshold": NaN,
+        "lookback_window": NaN,
+        "bb_window": NaN,
+        "bb_alpha": NaN,
+        "af0": NaN,
+        "af_increment": NaN,
+        "max_af": NaN,
+        "rsi_lower": NaN,
+        "rsi_upper": NaN,
+        "timeframe_1": NaN,
+        "timeframe_2": NaN
+    },
+    "short": null,
+    "metadata": {
+        "optimization_date": "2024-12-01",
+        "optimization_settings": {
+            "n_trials": 5,
+            "seed": 42,
+            "n_startup_trials": 50,
+            "n_warmup_steps": 10,
+            "interval_steps": 5
+        },
+        "timeframes": {
+            "base": "1min",
+            "analysis": "60min",
+            "regime": "1D"
+        },
+        "regime_settings": {
+            "ma_short_window": 21,
+            "ma_long_window": 88,
+            "vol_short_window": 21,
+            "avg_vol_window": 365,
+            "target_regimes": [
+                1,
+                2
+            ]
+        },
+        "data_settings": {
+            "in_sample_pct": 0.7,
+            "lookback_days": 365
+        },
+        "analysis_timeframe": "60min"
+    },
+    "strategy_params": {
+        "fast_ma": [
+            5,
+            300
+        ],
+        "slow_ma": [
+            50,
+            1000
+        ],
+        "direction": [
+            "long",
+            "short"
+        ],
+        "use_sl_tp": [
+            false
+        ],
+        "atr_window": [
+            3,
+            100
+        ],
+        "atr_multiplier": [
+            0.1,
+            20.0
+        ]
+    }
+}

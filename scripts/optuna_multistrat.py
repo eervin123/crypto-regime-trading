@@ -176,10 +176,12 @@ def optimize_strategy(
     symbol_ohlcv_df,
     regime_data,
     allowed_regimes,
+    direction,
     n_trials=None,
+    n_best=5,
 ):
     """
-    Optimize strategy parameters using Optuna.
+    Optimize strategy parameters using Optuna, returning top N results.
 
     Args:
         strategy_func (callable): Strategy function to optimize
@@ -187,11 +189,15 @@ def optimize_strategy(
         symbol_ohlcv_df (pd.DataFrame): OHLCV price data
         regime_data (pd.Series): Market regime labels
         allowed_regimes (list): List of regime labels to trade in
+        direction (str): Trading direction ('long' or 'short')
         n_trials (int, optional): Number of optimization trials
+        n_best (int): Number of best trials to return (default: 5)
 
     Returns:
-        tuple: (best_params, best_portfolio, best_direction)
-            Optimized parameters and resulting portfolio
+        tuple: Tuple containing:
+            - Best parameters
+            - Portfolio object
+            - Objective value
     """
     # Update the n_trials parameter to use config if not specified
     if n_trials is None:
@@ -216,32 +222,56 @@ def optimize_strategy(
             else:
                 params[k] = v
 
-        pf = strategy_func(
-            symbol_ohlcv_df=symbol_ohlcv_df,
-            regime_data=regime_data,
-            allowed_regimes=allowed_regimes,
-            **params,
-        )
+        try:
+            pf = strategy_func(
+                symbol_ohlcv_df=symbol_ohlcv_df,
+                regime_data=regime_data,
+                allowed_regimes=allowed_regimes,
+                **params,
+            )
 
-        # Objective function options to maximize:
+            # Check minimum trades requirement
+            if pf.trades.count() < config["objective"]["min_trades"]:
+                return float("-inf")
 
-        # Current objective: Balance between trade frequency and returns
-        # - Weights number of trades (20%) to avoid overfitting on few trades
-        # objective = (pf.trades.count() * 0.20) * pf.total_return
-        objective = pf.calmar_ratio
+            # Calculate weighted objective based on configuration
+            objective_value = 0.0
+            metrics = config["objective"]["metrics"]
+            
+            # Add metric contributions based on weights
+            for metric_name, metric_config in metrics.items():
+                weight = metric_config["weight"]
+                if weight > 0:
+                    if metric_name == "calmar_ratio":
+                        value = pf.calmar_ratio
+                    elif metric_name == "sharpe_ratio":
+                        value = pf.sharpe_ratio
+                    elif metric_name == "sortino_ratio":
+                        value = pf.sortino_ratio
+                    elif metric_name == "omega_ratio":
+                        value = pf.omega_ratio
+                    elif metric_name == "total_return":
+                        value = pf.total_return
+                    elif metric_name == "win_rate":
+                        value = pf.trades.win_rate
+                    elif metric_name == "profit_factor":
+                        value = pf.trades.profit_factor
+                    
+                    if pd.isna(value) or np.isinf(value):
+                        return float("-inf")
+                    
+                    objective_value += weight * value
 
-        # Alternative objectives to consider:
-        # pf.total_return              # Simple returns - good for pure performance
-        # pf.sharpe_ratio             # Returns/volatility - good for risk-adjusted performance
-        # pf.sortino_ratio            # Similar to Sharpe but only penalizes downside volatility
-        # pf.omega_ratio              # Probability weighted ratio of gains vs losses
-        # pf.trades.win_rate          # Pure win rate - but beware of small gains vs large losses
-        # pf.calmar_ratio             # Returns/max drawdown - good for drawdown-sensitive strategies
-        # pf.trades.profit_factor     # Gross profits/gross losses - good for consistent profitability
+            # Add trade count weight if configured
+            trade_weight = config["objective"]["trade_weight"]
+            if trade_weight > 0:
+                objective_value += trade_weight * pf.trades.count()
 
-        return (
-            float("-inf") if pd.isna(objective) else objective
-        )  # Return -inf for invalid strategies
+            return float("-inf") if pd.isna(objective_value) else objective_value
+
+        except Exception as e:
+            print(f"Error in objective function: {str(e)}")
+            return float("-inf")
 
     sampler = TPESampler(n_startup_trials=10, seed=42)
     pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=25, interval_steps=10)
@@ -254,24 +284,28 @@ def optimize_strategy(
 
     study.optimize(objective, n_trials=n_trials, callbacks=[early_stopping_callback])
 
-    best_params = study.best_params
-    best_direction = best_params["direction"]
-
-    print(
-        f"Best parameters for {strategy_func.__name__} ({best_direction}): ",
-        best_params,
-    )
-    print("Best value: ", study.best_value)
-
-    # Backtest with the best parameters
-    best_pf = strategy_func(
-        symbol_ohlcv_df=symbol_ohlcv_df,
-        regime_data=regime_data,
-        allowed_regimes=allowed_regimes,
-        **best_params,
-    )
-
-    return best_params, best_pf, best_direction
+    # Get top N trials
+    top_trials = sorted(study.trials, key=lambda t: t.value if t.value is not None else float('-inf'), reverse=True)[:n_best]
+    
+    results = []
+    for trial in top_trials:
+        if trial.value is not None and trial.value > float('-inf'):
+            params = trial.params.copy()
+            params["direction"] = direction
+            
+            # Run strategy with these parameters
+            pf = strategy_func(
+                symbol_ohlcv_df=symbol_ohlcv_df,
+                regime_data=regime_data,
+                allowed_regimes=allowed_regimes,
+                **params,
+            )
+            
+            results.append((params, pf, trial.value))
+    
+    # Return the best result for the main workflow
+    best_result = max(results, key=lambda x: x[2]) if results else (None, None, float('-inf'))
+    return best_result
 
 
 # Define parameter ranges for each strategy
@@ -1013,14 +1047,27 @@ def ensure_results_dir():
     return results_dir, params_dir, backtests_dir
 
 
-def save_optimal_params(in_sample_results, timeframe_id, target_regimes, config):
+def save_optimal_params(in_sample_results, timeframe_id, target_regimes, config, n_best=5):
     """
     Save optimal parameters for each strategy to JSON files with config metadata.
+    Include top N parameter sets with their metrics.
     """
     # Get the params directory
-    results_dir, params_dir, _ = (
-        ensure_results_dir()
-    )  # Now properly unpacking the tuple
+    results_dir, params_dir, _ = ensure_results_dir()
+
+    # Define parameter columns (exclude metrics and metadata)
+    param_cols = [
+        col for col in in_sample_results.columns
+        if col not in [
+            "Symbol", "Strategy", "Base Strategy", "Direction", "Portfolio",
+            "Total Return", "Sharpe Ratio", "Sortino Ratio", "Win Rate",
+            "Max Drawdown", "Calmar Ratio", "Omega Ratio", "Profit Factor",
+            "Expectancy", "Total Trades", "optimization_score"
+        ]
+    ]
+
+    # Create regime string for filename
+    regime_str = "_".join(map(str, target_regimes))
 
     # Strategy name mapping between results and config
     strategy_config_mapping = {
@@ -1056,88 +1103,63 @@ def save_optimal_params(in_sample_results, timeframe_id, target_regimes, config)
         "analysis_timeframe": timeframe_id,
     }
 
-    # Group results by Symbol and Strategy (without direction)
-    # First, clean strategy names to remove direction
+    # Group results by Symbol and Strategy
     in_sample_results["Base Strategy"] = in_sample_results["Strategy"].apply(
         lambda x: x.split(" (")[0]
     )
-
     grouped = in_sample_results.groupby(["Symbol", "Base Strategy"])
 
     for (symbol, strategy), group in grouped:
-        # Get the correct strategy name for config lookup
-        strategy_config_name = strategy_config_mapping.get(
-            f"{strategy} (Long)"
-        )  # Use either Long or Short version
+        strategy_config_name = strategy_config_mapping.get(f"{strategy} (Long)")
         if strategy_config_name is None:
             print(f"Warning: No config mapping found for strategy {strategy}")
             continue
 
-        # Get parameter columns (exclude metrics and metadata)
-        param_cols = [
-            col
-            for col in group.columns
-            if col
-            not in [
-                "Symbol",
-                "Strategy",
-                "Base Strategy",
-                "Direction",
-                "Portfolio",
-                "Total Return",
-                "Sharpe Ratio",
-                "Sortino Ratio",
-                "Win Rate",
-                "Max Drawdown",
-                "Calmar Ratio",
-                "Omega Ratio",
-                "Profit Factor",
-                "Expectancy",
-                "Total Trades",
-            ]
-        ]
-
         params_dict = {
-            "long": None,
-            "short": None,
+            "long": [],
+            "short": [],
             "metadata": metadata,
             "strategy_params": config["strategy_params"][strategy_config_name],
         }
 
-        # Check for long direction results
+        # Process long direction results
         long_results = group[group["Direction"] == "long"]
-        if not long_results.empty and long_results["Total Return"].iloc[0] > 0:
-            params_dict["long"] = long_results[param_cols].to_dict("records")[0]
-        else:
-            print(f"Warning: No valid long results for {symbol} {strategy}")
+        if not long_results.empty:
+            top_long = long_results.nlargest(n_best, "optimization_score")
+            for _, result in top_long.iterrows():
+                params_dict["long"].append({
+                    "parameters": {k: result[k] for k in param_cols if k in result},
+                    "metrics": {
+                        "total_return": result["Total Return"],
+                        "sharpe_ratio": result["Sharpe Ratio"],
+                        "sortino_ratio": result["Sortino Ratio"],
+                        "calmar_ratio": result["Calmar Ratio"],
+                        "optimization_score": result["optimization_score"]
+                    }
+                })
 
-        # Check for short direction results
+        # Process short direction results
         short_results = group[group["Direction"] == "short"]
-        if not short_results.empty and short_results["Total Return"].iloc[0] > 0:
-            params_dict["short"] = short_results[param_cols].to_dict("records")[0]
-        else:
-            print(f"Warning: No valid short results for {symbol} {strategy}")
+        if not short_results.empty:
+            top_short = short_results.nlargest(n_best, "optimization_score")
+            for _, result in top_short.iterrows():
+                params_dict["short"].append({
+                    "parameters": {k: result[k] for k in param_cols if k in result},
+                    "metrics": {
+                        "total_return": result["Total Return"],
+                        "sharpe_ratio": result["Sharpe Ratio"],
+                        "sortino_ratio": result["Sortino Ratio"],
+                        "calmar_ratio": result["Calmar Ratio"],
+                        "optimization_score": result["optimization_score"]
+                    }
+                })
 
-        # Only save if we have at least one valid direction
-        if params_dict["long"] is not None or params_dict["short"] is not None:
-            # Create filename with regime info
-            strategy_name = strategy.lower().replace(" ", "_")
-            regime_str = "_".join(map(str, target_regimes))
-            filename = (
-                f"{symbol.lower()}_{strategy_name}_params"
-                f"_regimes_{regime_str}"
-                f"_tf_{timeframe_id}.json"
-            )
-
-            # Save to JSON
+        # Save if we have any valid results
+        if params_dict["long"] or params_dict["short"]:
+            filename = f"{symbol.lower()}_{strategy.lower().replace(' ', '_')}_params_regimes_{regime_str}_tf_{timeframe_id}.json"
             with open(params_dir / filename, "w") as f:
                 json.dump(params_dict, indent=4, default=str, fp=f)
-
-            print(f"Saved optimal parameters for {symbol} {strategy} to {filename}")
-        else:
-            print(
-                f"Skipping {symbol} {strategy} - no valid results for either direction"
-            )
+            print(f"Saved top {n_best} parameter sets for {symbol} {strategy}")
 
 
 def run_optimized_strategies(
@@ -1163,6 +1185,8 @@ def run_optimized_strategies(
 
     # Optimize on in-sample data
     in_sample_results = []
+    equity_curves = {}  # Initialize equity_curves dictionary
+    
     for symbol in ["BTC", "ETH"]:
         for name, func, params in strategies:
             # Optimize for long
@@ -1174,6 +1198,7 @@ def run_optimized_strategies(
                 in_sample_data[symbol],
                 in_sample_regimes[symbol],
                 target_regimes,
+                "long",
             )
 
             # Only add if strategy produced valid results
@@ -1181,6 +1206,7 @@ def run_optimized_strategies(
                 in_sample_results.append(
                     create_stats(name, symbol, "long", long_pf, best_long_params)
                 )
+                equity_curves[f"{symbol}_{name}_long_in_sample"] = long_pf.value
 
             # Optimize for short
             short_params = params.copy()
@@ -1191,6 +1217,7 @@ def run_optimized_strategies(
                 in_sample_data[symbol],
                 in_sample_regimes[symbol],
                 target_regimes,
+                "short",
             )
 
             # Only add if strategy produced valid results
@@ -1198,15 +1225,18 @@ def run_optimized_strategies(
                 in_sample_results.append(
                     create_stats(name, symbol, "short", short_pf, best_short_params)
                 )
+                equity_curves[f"{symbol}_{name}_short_in_sample"] = short_pf.value
 
     # After optimization but before out-of-sample testing, save the parameters
-    timeframe_id = analysis_tf.replace("T", "m")
+    timeframe_id = analysis_tf.replace("T", "min")
     save_optimal_params(
         pd.DataFrame(in_sample_results), timeframe_id, target_regimes, config
     )
 
     # Test optimized parameters on out-of-sample data
     out_sample_results = []
+    combined_results = []
+    
     for stat in in_sample_results:
         # Get the optimized parameters (excluding metrics and metadata)
         params = {
@@ -1241,19 +1271,169 @@ def run_optimized_strategies(
         )
 
         # Run strategy with optimized params on out-of-sample data
-        pf = strategy_func(
+        out_pf = strategy_func(
             symbol_ohlcv_df=out_sample_data[symbol],
             regime_data=out_sample_regimes[symbol],
             allowed_regimes=target_regimes,
             **params,
         )
+        
+        # Save out-of-sample equity curve
+        equity_curves[f"{symbol}_{strategy_name}_{direction}_out_sample"] = out_pf.value
 
-        # Create stats
+        # Create stats for out-of-sample
         out_sample_results.append(
-            create_stats(strategy_name, symbol, direction, pf, params)
+            create_stats(strategy_name, symbol, direction, out_pf, params)
+        )
+        
+        # Run strategy on combined data
+        combined_data = pd.concat([in_sample_data[symbol], out_sample_data[symbol]])
+        combined_regimes = pd.concat([in_sample_regimes[symbol], out_sample_regimes[symbol]])
+        
+        combined_pf = strategy_func(
+            symbol_ohlcv_df=combined_data,
+            regime_data=combined_regimes,
+            allowed_regimes=target_regimes,
+            **params,
+        )
+        
+        # Save combined equity curve
+        equity_curves[f"{symbol}_{strategy_name}_{direction}_combined"] = combined_pf.value
+        
+        # Create stats for combined sample
+        combined_results.append(
+            create_stats(strategy_name, symbol, direction, combined_pf, params)
         )
 
-    return pd.DataFrame(in_sample_results), pd.DataFrame(out_sample_results)
+    # Create equity curves DataFrame
+    equity_curves_df = pd.DataFrame({k: pd.Series(v) for k, v in equity_curves.items()})
+
+    # Create results directory and get subdirectories
+    results_dir, params_dir, backtests_dir = ensure_results_dir()
+
+    # Create timeframe identifier for filenames
+    timeframe_id = f"{analysis_tf.replace('T', 'min')}"
+
+    # Save results
+    for period, results in [
+        ("in_sample", in_sample_results),
+        ("out_sample", out_sample_results),
+        ("combined", combined_results)
+    ]:
+        # Save to CSV with strategies as columns
+        csv_df = pd.DataFrame(results).drop("Portfolio", axis=1).set_index(
+            ["Symbol", "Strategy", "Direction"]
+        )
+        csv_df = csv_df.unstack(["Strategy", "Direction"])
+
+        # Create filepath in backtests directory with timeframe
+        filename = f"{period}_results_regimes_{'_'.join(map(str, target_regimes))}_{timeframe_id}.csv"
+        filepath = backtests_dir / filename
+
+        # Save the CSV
+        csv_df.to_csv(filepath)
+        print(f"Saved {period} results to {filepath}")
+
+    # Save equity curves
+    equity_curves_file = backtests_dir / f"equity_curves_regimes_{'_'.join(map(str, target_regimes))}_{timeframe_id}.csv"
+    equity_curves_df.to_csv(equity_curves_file)
+    print(f"\nEquity curves saved to: {equity_curves_file}")
+
+    # Print the date ranges for reference
+    print(
+        f"In-sample period: {in_sample_data['BTC'].index[0]} to {in_sample_data['BTC'].index[-1]}"
+    )
+    print(
+        f"Out-sample period: {out_sample_data['BTC'].index[0]} to {out_sample_data['BTC'].index[-1]}"
+    )
+
+    # Display tabulated results first
+    for symbol in ["BTC", "ETH"]:
+        print(f"\n{symbol} In-Sample Results:")
+        print(
+            tabulate(
+                format_results_table(
+                    pd.DataFrame(in_sample_results)[pd.DataFrame(in_sample_results)["Symbol"] == symbol]
+                ),
+                headers="keys",
+                tablefmt="pipe",
+                floatfmt=".4f",
+            )
+        )
+
+        print(f"\n{symbol} Out-of-Sample Results:")
+        print(
+            tabulate(
+                format_results_table(
+                    pd.DataFrame(out_sample_results)[pd.DataFrame(out_sample_results)["Symbol"] == symbol]
+                ),
+                headers="keys",
+                tablefmt="pipe",
+                floatfmt=".4f",
+            )
+        )
+        
+        print(f"\n{symbol} Combined Results:")
+        print(
+            tabulate(
+                format_results_table(
+                    pd.DataFrame(combined_results)[pd.DataFrame(combined_results)["Symbol"] == symbol]
+                ),
+                headers="keys",
+                tablefmt="pipe",
+                floatfmt=".4f",
+            )
+        )
+        print("\n" + "=" * 80)
+
+    # Create subplot figures for each symbol and period
+    for symbol in ["BTC", "ETH"]:
+        # Get unique strategies
+        strategies = pd.DataFrame(in_sample_results)["Strategy"].unique()
+        n_strategies = len(strategies)
+
+        # Calculate grid dimensions (trying to make it roughly square)
+        n_cols = int(np.ceil(np.sqrt(n_strategies)))
+        n_rows = int(np.ceil(n_strategies / n_cols))
+
+        # Create figures for each period
+        for period, results, title_prefix in [
+            (in_sample_results, "In-Sample"),
+            (out_sample_results, "Out-of-Sample"),
+            (combined_results, "Combined")
+        ]:
+            fig = vbt.make_subplots(
+                rows=n_rows,
+                cols=n_cols,
+                subplot_titles=[f"{strat}" for strat in strategies],
+                vertical_spacing=0.1,
+            )
+
+            # Plot results
+            for idx, strategy in enumerate(strategies):
+                row = idx // n_cols + 1
+                col = idx % n_cols + 1
+
+                strategy_results = pd.DataFrame(results)[
+                    (pd.DataFrame(results)["Symbol"] == symbol)
+                    & (pd.DataFrame(results)["Strategy"] == strategy)
+                ]
+
+                for _, result in strategy_results.iterrows():
+                    pf_fig = result["Portfolio"].plot_cum_returns()
+                    for trace in pf_fig.data:
+                        trace.name = f"{result['Direction']}"
+                        fig.add_trace(trace, row=row, col=col)
+
+            fig.update_layout(
+                height=300 * n_rows,
+                width=1200,
+                title=f"{symbol} {title_prefix} Performance by Strategy",
+                showlegend=True,
+            )
+            fig.show()
+
+    return pd.DataFrame(in_sample_results), pd.DataFrame(out_sample_results), pd.DataFrame(combined_results), equity_curves_df
 
 
 def format_results_table(results_df):
@@ -1365,7 +1545,7 @@ if __name__ == "__main__":
     target_regimes = config["regime"]["target_regimes"]
 
     # Run optimization and get both in-sample and out-of-sample results
-    in_sample_results, out_sample_results = run_optimized_strategies(
+    in_sample_results, out_sample_results, combined_results, equity_curves_df = run_optimized_strategies(
         target_regimes,
         in_sample_data,
         out_sample_data,
@@ -1377,15 +1557,16 @@ if __name__ == "__main__":
     results_dir, params_dir, backtests_dir = ensure_results_dir()
 
     # Create timeframe identifier for filenames
-    timeframe_id = f"{analysis_tf.replace('T', 'm')}"
+    timeframe_id = f"{analysis_tf.replace('T', 'min')}"
 
     # Save results
     for period, results in [
         ("in_sample", in_sample_results),
         ("out_sample", out_sample_results),
+        ("combined", combined_results)
     ]:
         # Save to CSV with strategies as columns
-        csv_df = results.drop("Portfolio", axis=1).set_index(
+        csv_df = pd.DataFrame(results).drop("Portfolio", axis=1).set_index(
             ["Symbol", "Strategy", "Direction"]
         )
         csv_df = csv_df.unstack(["Strategy", "Direction"])
@@ -1397,8 +1578,13 @@ if __name__ == "__main__":
         # Save the CSV
         csv_df.to_csv(filepath)
         print(f"Saved {period} results to {filepath}")
-    # Print the date ranges for reference
 
+    # Save equity curves
+    equity_curves_file = backtests_dir / f"equity_curves_regimes_{'_'.join(map(str, target_regimes))}_{timeframe_id}.csv"
+    equity_curves_df.to_csv(equity_curves_file)
+    print(f"\nEquity curves saved to: {equity_curves_file}")
+
+    # Print the date ranges for reference
     print(
         f"In-sample period: {in_sample_data['BTC'].index[0]} to {in_sample_data['BTC'].index[-1]}"
     )
@@ -1412,7 +1598,7 @@ if __name__ == "__main__":
         print(
             tabulate(
                 format_results_table(
-                    in_sample_results[in_sample_results["Symbol"] == symbol]
+                    pd.DataFrame(in_sample_results)[pd.DataFrame(in_sample_results)["Symbol"] == symbol]
                 ),
                 headers="keys",
                 tablefmt="pipe",
@@ -1424,7 +1610,19 @@ if __name__ == "__main__":
         print(
             tabulate(
                 format_results_table(
-                    out_sample_results[out_sample_results["Symbol"] == symbol]
+                    pd.DataFrame(out_sample_results)[pd.DataFrame(out_sample_results)["Symbol"] == symbol]
+                ),
+                headers="keys",
+                tablefmt="pipe",
+                floatfmt=".4f",
+            )
+        )
+        
+        print(f"\n{symbol} Combined Results:")
+        print(
+            tabulate(
+                format_results_table(
+                    pd.DataFrame(combined_results)[pd.DataFrame(combined_results)["Symbol"] == symbol]
                 ),
                 headers="keys",
                 tablefmt="pipe",
@@ -1436,73 +1634,46 @@ if __name__ == "__main__":
     # Create subplot figures for each symbol and period
     for symbol in ["BTC", "ETH"]:
         # Get unique strategies
-        strategies = in_sample_results["Strategy"].unique()
+        strategies = pd.DataFrame(in_sample_results)["Strategy"].unique()
         n_strategies = len(strategies)
 
         # Calculate grid dimensions (trying to make it roughly square)
         n_cols = int(np.ceil(np.sqrt(n_strategies)))
         n_rows = int(np.ceil(n_strategies / n_cols))
 
-        # Create in-sample figure
-        fig_in = vbt.make_subplots(
-            rows=n_rows,
-            cols=n_cols,
-            subplot_titles=[f"{strat}" for strat in strategies],
-            vertical_spacing=0.1,
-        )
+        # Create figures for each period
+        for period, results, title_prefix in [
+            (in_sample_results, "In-Sample"),
+            (out_sample_results, "Out-of-Sample"),
+            (combined_results, "Combined")
+        ]:
+            fig = vbt.make_subplots(
+                rows=n_rows,
+                cols=n_cols,
+                subplot_titles=[f"{strat}" for strat in strategies],
+                vertical_spacing=0.1,
+            )
 
-        # Plot in-sample results
-        for idx, strategy in enumerate(strategies):
-            row = idx // n_cols + 1
-            col = idx % n_cols + 1
+            # Plot results
+            for idx, strategy in enumerate(strategies):
+                row = idx // n_cols + 1
+                col = idx % n_cols + 1
 
-            strategy_results = in_sample_results[
-                (in_sample_results["Symbol"] == symbol)
-                & (in_sample_results["Strategy"] == strategy)
-            ]
+                strategy_results = pd.DataFrame(results)[
+                    (pd.DataFrame(results)["Symbol"] == symbol)
+                    & (pd.DataFrame(results)["Strategy"] == strategy)
+                ]
 
-            for _, result in strategy_results.iterrows():
-                pf_fig = result["Portfolio"].plot_cum_returns()
-                for trace in pf_fig.data:
-                    trace.name = f"{result['Direction']}"
-                    fig_in.add_trace(trace, row=row, col=col)
+                for _, result in strategy_results.iterrows():
+                    pf_fig = result["Portfolio"].plot_cum_returns()
+                    for trace in pf_fig.data:
+                        trace.name = f"{result['Direction']}"
+                        fig.add_trace(trace, row=row, col=col)
 
-        fig_in.update_layout(
-            height=300 * n_rows,
-            width=1200,
-            title=f"{symbol} In-Sample Performance by Strategy",
-            showlegend=True,
-        )
-        fig_in.show()
-
-        # Create out-of-sample figure
-        fig_out = vbt.make_subplots(
-            rows=n_rows,
-            cols=n_cols,
-            subplot_titles=[f"{strat}" for strat in strategies],
-            vertical_spacing=0.1,
-        )
-
-        # Plot out-of-sample results
-        for idx, strategy in enumerate(strategies):
-            row = idx // n_cols + 1
-            col = idx % n_cols + 1
-
-            strategy_results = out_sample_results[
-                (out_sample_results["Symbol"] == symbol)
-                & (out_sample_results["Strategy"] == strategy)
-            ]
-
-            for _, result in strategy_results.iterrows():
-                pf_fig = result["Portfolio"].plot_cum_returns()
-                for trace in pf_fig.data:
-                    trace.name = f"{result['Direction']}"
-                    fig_out.add_trace(trace, row=row, col=col)
-
-        fig_out.update_layout(
-            height=300 * n_rows,
-            width=1200,
-            title=f"{symbol} Out-of-Sample Performance by Strategy",
-            showlegend=True,
-        )
-        fig_out.show()
+            fig.update_layout(
+                height=300 * n_rows,
+                width=1200,
+                title=f"{symbol} {title_prefix} Performance by Strategy",
+                showlegend=True,
+            )
+            fig.show()
