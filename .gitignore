@@ -4,6 +4,9 @@
 
 # Database
 *.db
+# Large files
+*.csv
+*.parquet
 
 ### macOS ###
 # General
