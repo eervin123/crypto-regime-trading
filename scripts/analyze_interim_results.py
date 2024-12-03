@@ -11,12 +11,14 @@ from tabulate import tabulate
 import logging
 import sqlite3
 
+
 def setup_logging():
     """Setup logging configuration."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+
 
 def analyze_interim_results():
     """Analyze current optimization results from database and saved files."""
@@ -38,46 +40,50 @@ def analyze_interim_results():
     cursor.execute("SELECT study_name FROM studies")
     study_names = [row[0] for row in cursor.fetchall()]
     conn.close()
-    
+
     print(f"\nFound {len(study_names)} studies")
-    
+
     # Group studies by symbol and strategy
     study_results = []
     for study_name in study_names:
         study = optuna.load_study(study_name=study_name, storage=storage)
-        
+
         # Parse study name for information
-        parts = study_name.split('_')
+        parts = study_name.split("_")
         symbol = parts[0].upper()
         direction = parts[-2]  # Assuming format: symbol_strategy_direction_timestamp
-        strategy = ' '.join(parts[1:-2]).title()
-        
+        strategy = " ".join(parts[1:-2]).title()
+
         # Get study statistics
         n_trials = len(study.trials)
         best_value = study.best_value if study.best_trial else "No trials completed"
         best_params = study.best_params if study.best_trial else {}
-        
-        study_results.append({
-            'Symbol': symbol,
-            'Strategy': strategy,
-            'Direction': direction,
-            'Trials': n_trials,
-            'Best Value': best_value,
-            'Best Params': best_params
-        })
-    
+
+        study_results.append(
+            {
+                "Symbol": symbol,
+                "Strategy": strategy,
+                "Direction": direction,
+                "Trials": n_trials,
+                "Best Value": best_value,
+                "Best Params": best_params,
+            }
+        )
+
     # Convert to DataFrame for better display
     if study_results:
         df = pd.DataFrame(study_results)
-        for symbol in df['Symbol'].unique():
+        for symbol in df["Symbol"].unique():
             print(f"\n{symbol} Optimization Progress:")
-            symbol_df = df[df['Symbol'] == symbol]
-            print(tabulate(
-                symbol_df[['Strategy', 'Direction', 'Trials', 'Best Value']],
-                headers='keys',
-                tablefmt='pipe',
-                floatfmt='.4f'
-            ))
+            symbol_df = df[df["Symbol"] == symbol]
+            print(
+                tabulate(
+                    symbol_df[["Strategy", "Direction", "Trials", "Best Value"]],
+                    headers="keys",
+                    tablefmt="pipe",
+                    floatfmt=".4f",
+                )
+            )
 
     # Check saved results
     results_dir = Path("results/backtests")
@@ -88,36 +94,40 @@ def analyze_interim_results():
                 print(f"\nFound results file: {csv_file.name}")
                 try:
                     # Read raw CSV data first
-                    with open(csv_file, 'r') as f:
+                    with open(csv_file, "r") as f:
                         lines = f.readlines()
-                    
+
                     if len(lines) >= 4:  # Need at least header rows and one data row
                         # Parse header rows
-                        metrics = [m.strip() for m in lines[0].strip().split(',')]
-                        strategies = [s.strip() for s in lines[1].strip().split(',')]
-                        directions = [d.strip() for d in lines[2].strip().split(',')]
-                        symbols = [s.strip() for s in lines[3].strip().split(',')]
-                        data = [d.strip() for d in lines[4].strip().split(',')]  # First data row
-                        
+                        metrics = [m.strip() for m in lines[0].strip().split(",")]
+                        strategies = [s.strip() for s in lines[1].strip().split(",")]
+                        directions = [d.strip() for d in lines[2].strip().split(",")]
+                        symbols = [s.strip() for s in lines[3].strip().split(",")]
+                        data = [
+                            d.strip() for d in lines[4].strip().split(",")
+                        ]  # First data row
+
                         # Group results by strategy
                         strategy_results = {}
-                        for i in range(1, len(metrics)):  # Skip first column (usually empty or 'Strategy')
-                            if strategies[i] and strategies[i] != 'Strategy':
+                        for i in range(
+                            1, len(metrics)
+                        ):  # Skip first column (usually empty or 'Strategy')
+                            if strategies[i] and strategies[i] != "Strategy":
                                 strategy = strategies[i]
                                 if strategy not in strategy_results:
                                     strategy_results[strategy] = {}
-                                
+
                                 # Get base metric name without the numbered suffix
-                                metric = metrics[i].split('.')[0]
+                                metric = metrics[i].split(".")[0]
                                 try:
-                                    if data[i] and data[i] != '':
+                                    if data[i] and data[i] != "":
                                         value = float(data[i])
                                         if metric not in strategy_results[strategy]:
                                             strategy_results[strategy][metric] = []
                                         strategy_results[strategy][metric].append(value)
                                 except (ValueError, IndexError) as e:
                                     continue
-                        
+
                         # Print results
                         print(f"\nStrategies found: {len(strategy_results)}")
                         for strategy, metrics in strategy_results.items():
@@ -130,10 +140,12 @@ def analyze_interim_results():
                 except Exception as e:
                     print(f"Error reading {csv_file.name}: {e}")
 
+
 def main():
     setup_logging()
     print("Analyzing interim optimization results...")
     analyze_interim_results()
 
+
 if __name__ == "__main__":
-    main() 
+    main()

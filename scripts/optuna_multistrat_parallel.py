@@ -5,15 +5,32 @@ This module is an experimental parallel version of optuna_multistrat.py, designe
 test performance improvements through parallel processing.
 """
 
-from optuna_multistrat import (
-    load_config,
+# Import from our modules
+from data_utils import (
     load_data,
-    calculate_regimes,
-    create_stats,
+    validate_timeframe_params,
+)
+from config_utils import (
+    load_config,
     ensure_results_dir,
-    save_optimal_params,
+    get_timeframe_id,
+    STRATEGY_MAPPING,
+    get_default_cooldown_period,
+)
+from results_utils import (
+    create_stats,
     format_results_table,
-    # Import strategy functions
+    save_optimal_params,
+    create_results_table,
+    display_results,
+    plot_performance_comparison,
+)
+from utils import (
+    setup_logging,
+    log_memory_usage,
+)
+from db_utils import initialize_optuna_database
+from strategies import (
     run_ma_strategy_with_stops,
     run_macd_divergence_strategy_with_stops,
     run_rsi_divergence_strategy_with_stops,
@@ -21,51 +38,24 @@ from optuna_multistrat import (
     run_psar_strategy_with_stops,
     run_rsi_mean_reversion_strategy,
     mean_reversion_strategy,
+    calculate_regimes,
 )
-from tabulate import tabulate  # Add this import at the top of the file
+
+import logging
 import optuna
 from optuna.samplers import TPESampler
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
-import logging
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
 import gc
 from pathlib import Path
 from optuna.storages import RDBStorage
-import plotly.io as pio
-from plotly.subplots import make_subplots
-import psutil  # Add at the top with other imports
-import plotly.graph_objects as go
 
-# Set the default renderer to 'browser' to open plots in your default web browser
-pio.renderers.default = "browser"
-# dark mode
+# Set renderer (could move to config)
+vbt.settings.plotting.use_resampler = True
 vbt.settings.set_theme("dark")
-
-# Add this near the top of the file, after the imports
-STRATEGY_MAPPING = {
-    "Moving Average": ("ma", run_ma_strategy_with_stops),
-    "MACD Divergence": ("macd", run_macd_divergence_strategy_with_stops),
-    "RSI Divergence": ("rsi", run_rsi_divergence_strategy_with_stops),
-    "Bollinger Bands": ("bbands", run_bbands_strategy_with_stops),
-    "Parabolic SAR": ("psar", run_psar_strategy_with_stops),
-    "RSI Mean Reversion": ("rsi_mean_reversion", run_rsi_mean_reversion_strategy),
-    "Mean Reversion": ("mean_reversion", mean_reversion_strategy),
-}
-
-
-def setup_logging():
-    """Setup logging configuration."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler("parallel_optimization.log"),
-            logging.StreamHandler(),
-        ],
-    )
 
 
 def objective(
@@ -298,6 +288,7 @@ def optimize_single_strategy(args):
                             "macd_fast",
                             "macd_slow",
                             "macd_signal",
+                            "cooldown_period"
                         ]:
                             strategy_params[param_name] = trial.suggest_int(
                                 param_name, int(param_range[0]), int(param_range[1])
@@ -306,6 +297,12 @@ def optimize_single_strategy(args):
                             strategy_params[param_name] = trial.suggest_float(
                                 param_name, param_range[0], param_range[1]
                             )
+
+            # Add default cooldown period if not specified in params
+            if "cooldown_period" not in params and "cooldown_period" not in strategy_params:
+                strategy_params["cooldown_period"] = get_default_cooldown_period(
+                    config["timeframes"]["analysis"]
+                )
 
             strategy_params["direction"] = direction
 
@@ -342,18 +339,21 @@ def optimize_single_strategy(args):
         n_trials = config["optimization"]["n_trials"]
         print(f"Optimizing {name} {direction} for {symbol} ({n_trials} trials)")
         current_trial = 0
-        
+
         def progress_callback(study, trial):
             nonlocal current_trial
             current_trial += 1
             if current_trial % 50 == 0:  # Update less frequently
-                print(f"\r{name} {direction} {symbol}: {(current_trial/n_trials)*100:.1f}% complete", end="")
-        
+                print(
+                    f"\r{name} {direction} {symbol}: {(current_trial/n_trials)*100:.1f}% complete",
+                    end="",
+                )
+
         study.optimize(
             objective_wrapper,
             n_trials=n_trials,
             show_progress_bar=False,
-            callbacks=[progress_callback]
+            callbacks=[progress_callback],
         )
 
         if study.best_trial is not None:
@@ -434,7 +434,9 @@ def run_optimized_strategies_parallel(
         completed_strategies = 0
         total_strategies = len(optimization_tasks)
 
-        print(f"\nStarting optimization with {total_trials} total trials across {total_strategies} strategy combinations...")
+        print(
+            f"\nStarting optimization with {total_trials} total trials across {total_strategies} strategy combinations..."
+        )
 
         # Run optimizations in parallel with error handling
         with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
@@ -469,6 +471,12 @@ def run_optimized_strategies_parallel(
             strategy_specific_params = strategy_params[param_key]
             params = {k: result[k] for k in strategy_specific_params.keys()}
             params["direction"] = direction
+
+            # Ensure cooldown period is included
+            if "cooldown_period" in result:
+                params["cooldown_period"] = result["cooldown_period"]
+            else:
+                params["cooldown_period"] = get_default_cooldown_period(config["timeframes"]["analysis"])
 
             # Run out-of-sample backtest
             out_pf = strategy_func(
@@ -541,47 +549,11 @@ def run_optimized_strategies_parallel(
             f"Out-sample period: {out_sample_data['BTC'].index[0]} to {out_sample_data['BTC'].index[-1]}"
         )
 
-        # Display tabulated results
-        for symbol in ["BTC", "ETH"]:
-            print(f"\n{symbol} In-Sample Results:")
-            print(
-                tabulate(
-                    format_results_table(
-                        in_sample_df[in_sample_df["Symbol"] == symbol]
-                    ),
-                    headers="keys",
-                    tablefmt="pipe",
-                    floatfmt=".4f",
-                )
-            )
+        # Create results dictionary
+        results_dict = {"in_sample": in_sample_df, "out_sample": out_sample_df}
 
-            # Add browser table display
-            in_sample_table = create_results_table(
-                format_results_table(in_sample_df[in_sample_df["Symbol"] == symbol]),
-                f"{symbol} In-Sample Results"
-            )
-            in_sample_table.show()
-
-            print(f"\n{symbol} Out-of-Sample Results:")
-            print(
-                tabulate(
-                    format_results_table(
-                        out_sample_df[out_sample_df["Symbol"] == symbol]
-                    ),
-                    headers="keys",
-                    tablefmt="pipe",
-                    floatfmt=".4f",
-                )
-            )
-
-            # Add browser table display
-            out_sample_table = create_results_table(
-                format_results_table(out_sample_df[out_sample_df["Symbol"] == symbol]),
-                f"{symbol} Out-of-Sample Results"
-            )
-            out_sample_table.show()
-
-            print("\n" + "=" * 80)
+        # Display results using new function
+        display_results(results_dict, display_mode="both")
 
         return in_sample_df, out_sample_df, equity_curves_df
 
@@ -620,12 +592,18 @@ def run_full_backtest(
                 # Convert to int if it's a window parameter
                 if any(
                     window_name in k.lower()
-                    for window_name in ["window", "ma", "period"]
+                    for window_name in ["window", "ma", "period", "cooldown"]
                 ):
                     params[k] = int(row[k])
                 else:
                     params[k] = row[k]
         params["direction"] = direction
+
+        # Ensure cooldown period is included
+        if "cooldown_period" in row:
+            params["cooldown_period"] = int(row["cooldown_period"])
+        else:
+            params["cooldown_period"] = get_default_cooldown_period(config["timeframes"]["analysis"])
 
         try:
             # Run full backtest
@@ -658,39 +636,6 @@ def run_full_backtest(
     full_df = pd.DataFrame(full_results) if full_results else pd.DataFrame()
 
     return full_df, equity_curves
-
-
-def log_memory_usage():
-    """Log current memory usage."""
-    process = psutil.Process()
-    memory_info = process.memory_info()
-    logging.info(f"Memory usage: {memory_info.rss / 1024 / 1024:.2f} MB")
-
-
-def create_results_table(df, title):
-    """Create a Plotly table figure from DataFrame."""
-    fig = go.Figure(data=[go.Table(
-        header=dict(
-            values=list(df.columns),
-            fill_color='darkslategray',
-            align='left',
-            font=dict(color='white', size=12)
-        ),
-        cells=dict(
-            values=[df[col] for col in df.columns],
-            fill_color='black',
-            align='left',
-            font=dict(color='white', size=11)
-        )
-    )])
-    
-    fig.update_layout(
-        title=title,
-        template="plotly_dark",
-        height=400 * (len(df) // 5 + 1),  # Adjust height based on number of rows
-    )
-    
-    return fig
 
 
 if __name__ == "__main__":
@@ -737,6 +682,16 @@ if __name__ == "__main__":
         for symbol in ["BTC", "ETH"]
     }
 
+    # Split regime data the same way
+    in_sample_regimes = {
+        symbol: aligned_regime_data[symbol].iloc[: split_idx[symbol]]
+        for symbol in ["BTC", "ETH"]
+    }
+    out_sample_regimes = {
+        symbol: aligned_regime_data[symbol].iloc[split_idx[symbol] :]
+        for symbol in ["BTC", "ETH"]
+    }
+
     # Get target regimes from config
     target_regimes = config["regime"]["target_regimes"]
 
@@ -749,8 +704,8 @@ if __name__ == "__main__":
         target_regimes,
         in_sample_data,
         out_sample_data,
-        aligned_regime_data,
-        aligned_regime_data,
+        in_sample_regimes,
+        out_sample_regimes,
     )
     log_memory_usage()  # After optimization
 
@@ -801,69 +756,5 @@ if __name__ == "__main__":
     )
     log_memory_usage()  # After full backtest
 
-    # Now create visualizations after we have all the data
-    log_memory_usage()  # Before plotting
-    print("\nCreating performance visualizations...")
-    for symbol in ["BTC", "ETH"]:
-        # Create 3x1 subplots
-        fig = vbt.make_subplots(
-            rows=3,
-            cols=1,
-            subplot_titles=[
-                f"{symbol} In-Sample Performance",
-                f"{symbol} Out-of-Sample Performance",
-                f"{symbol} Full Backtest Performance",
-            ],
-            vertical_spacing=0.1,
-        )
-
-        # Get unique strategies for consistent colors
-        strategies = in_sample_df[in_sample_df["Symbol"] == symbol]["Strategy"].unique()
-
-        # Plot in-sample results
-        for strategy in strategies:
-            strategy_results = in_sample_df[
-                (in_sample_df["Symbol"] == symbol)
-                & (in_sample_df["Strategy"] == strategy)
-            ]
-            for _, result in strategy_results.iterrows():
-                pf_fig = result["Portfolio"].plot_cum_returns()
-                for trace in pf_fig.data:
-                    trace.name = f"{strategy} ({result['Direction']})"
-                    fig.add_trace(trace, row=1, col=1)
-
-        # Plot out-of-sample results
-        for strategy in strategies:
-            strategy_results = out_sample_df[
-                (out_sample_df["Symbol"] == symbol)
-                & (out_sample_df["Strategy"] == strategy)
-            ]
-            for _, result in strategy_results.iterrows():
-                pf_fig = result["Portfolio"].plot_cum_returns()
-                for trace in pf_fig.data:
-                    trace.name = f"{strategy} ({result['Direction']})"
-                    fig.add_trace(trace, row=2, col=1)
-
-        # Plot full backtest results
-        for strategy in strategies:
-            strategy_results = full_df[
-                (full_df["Symbol"] == symbol) & (full_df["Strategy"] == strategy)
-            ]
-            for _, result in strategy_results.iterrows():
-                pf_fig = result["Portfolio"].plot_cum_returns()
-                for trace in pf_fig.data:
-                    trace.name = f"{strategy} ({result['Direction']})"
-                    fig.add_trace(trace, row=3, col=1)
-
-        # Update layout
-        fig.update_layout(
-            height=1200,
-            width=1200,
-            title=f"{symbol} Strategy Performance Comparison",
-            showlegend=True,
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.05),
-        )
-
-        # Show the figure
-        fig.show()
-    log_memory_usage()  # After plotting
+    # Plot performance comparison using the new function
+    plot_performance_comparison(in_sample_df, out_sample_df, full_df)
