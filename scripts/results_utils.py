@@ -207,54 +207,66 @@ def display_results_tables(results_dict, symbols=["BTC", "ETH"]):
 
 
 def plot_strategy_results(results_dict, symbols=["BTC", "ETH"]):
-    """Create and display strategy performance plots."""
+    """Create and display strategy performance plots, separating long and short strategies."""
     for symbol in symbols:
-        # Get unique strategies
-        strategies = pd.DataFrame(results_dict["in_sample"])["Strategy"].apply(
-            lambda x: x.split(" (")[0]
-        ).unique()
-        n_strategies = len(strategies)
+        for direction in ['long', 'short']:
+            # Get unique strategies for this direction
+            strategies = pd.DataFrame(results_dict["in_sample"])[
+                (pd.DataFrame(results_dict["in_sample"])["Symbol"] == symbol) &
+                (pd.DataFrame(results_dict["in_sample"])["Direction"] == direction)
+            ]["Strategy"].apply(lambda x: x.split(" (")[0]).unique()
+            
+            n_strategies = len(strategies)
+            if n_strategies == 0:
+                continue
 
-        # Calculate grid dimensions
-        n_cols = int(np.ceil(np.sqrt(n_strategies)))
-        n_rows = int(np.ceil(n_strategies / n_cols))
+            # Calculate grid dimensions
+            n_cols = int(np.ceil(np.sqrt(n_strategies)))
+            n_rows = int(np.ceil(n_strategies / n_cols))
 
-        # Plot each period
-        for period_name, results in results_dict.items():
-            fig = vbt.make_subplots(
-                rows=n_rows,
-                cols=n_cols,
-                subplot_titles=[f"{strat}" for strat in strategies],
-                vertical_spacing=0.1,
-            )
+            # Plot each period
+            for period_name, results in results_dict.items():
+                fig = vbt.make_subplots(
+                    rows=n_rows,
+                    cols=n_cols,
+                    subplot_titles=[f"{strat}" for strat in strategies],
+                    vertical_spacing=0.1,
+                )
 
-            # Plot results
-            for idx, strategy in enumerate(strategies):
-                row = idx // n_cols + 1
-                col = idx % n_cols + 1
+                # Plot results
+                for idx, strategy in enumerate(strategies):
+                    row = idx // n_cols + 1
+                    col = idx % n_cols + 1
 
-                # Convert results to DataFrame first
-                results_df = pd.DataFrame(results)
-                strategy_results = results_df[
-                    (results_df["Symbol"] == symbol) & 
-                    (results_df["Strategy"].str.startswith(strategy))
-                ]
-                
-                if not strategy_results.empty:
-                    for _, result in strategy_results.iterrows():
-                        if result["Portfolio"] is not None:
-                            pf_fig = result["Portfolio"].plot_cum_returns()
-                            for trace in pf_fig.data:
-                                trace.name = f"{result['Direction']}"
-                                fig.add_trace(trace, row=row, col=col)
+                    # Convert results to DataFrame first
+                    results_df = pd.DataFrame(results)
+                    strategy_results = results_df[
+                        (results_df["Symbol"] == symbol) & 
+                        (results_df["Strategy"].str.startswith(strategy)) &
+                        (results_df["Direction"] == direction)
+                    ]
+                    
+                    if not strategy_results.empty:
+                        for _, result in strategy_results.iterrows():
+                            if result["Portfolio"] is not None:
+                                pf_fig = result["Portfolio"].plot_cum_returns()
+                                for trace in pf_fig.data:
+                                    trace.name = f"{strategy}"
+                                    fig.add_trace(trace, row=row, col=col)
 
-            fig.update_layout(
-                height=300 * n_rows,
-                width=1200,
-                title=f"{symbol} {period_name} Performance by Strategy",
-                showlegend=True,
-            )
-            fig.show()
+                fig.update_layout(
+                    height=300 * n_rows,
+                    width=1200,
+                    title=f"{symbol} {direction.capitalize()} {period_name} Performance by Strategy",
+                    showlegend=True,
+                )
+
+                # Update all y-axes to log scale
+                for i in range(1, n_rows + 1):
+                    for j in range(1, n_cols + 1):
+                        fig.update_yaxes(type="log", row=i, col=j)
+
+                fig.show()
 
 
 def create_results_table(df, title):
@@ -334,7 +346,8 @@ def plot_results(results_dict, symbol, mode='subplots'):
 
 def plot_performance_comparison(in_sample_df, out_sample_df, full_df=None, symbols=["BTC", "ETH"]):
     """
-    Plot vertical comparison of in-sample, out-of-sample, and full backtest results.
+    Plot vertical comparison of in-sample, out-of-sample, and full backtest results,
+    separating long and short strategies.
     
     Args:
         in_sample_df (pd.DataFrame): In-sample results
@@ -343,73 +356,85 @@ def plot_performance_comparison(in_sample_df, out_sample_df, full_df=None, symbo
         symbols (list): List of symbols to plot
     """
     for symbol in symbols:
-        # Determine number of rows based on available data
-        n_rows = 3 if full_df is not None else 2
-        
-        # Create vertical subplots
-        fig = vbt.make_subplots(
-            rows=n_rows,
-            cols=1,
-            subplot_titles=[
-                f"{symbol} In-Sample Performance",
-                f"{symbol} Out-of-Sample Performance",
-                f"{symbol} Full Backtest Performance" if full_df is not None else None,
-            ],
-            vertical_spacing=0.1,
-        )
+        for direction in ['long', 'short']:
+            # Determine number of rows based on available data
+            n_rows = 3 if full_df is not None else 2
+            
+            # Create vertical subplots
+            fig = vbt.make_subplots(
+                rows=n_rows,
+                cols=1,
+                subplot_titles=[
+                    f"{symbol} {direction.capitalize()} In-Sample Performance",
+                    f"{symbol} {direction.capitalize()} Out-of-Sample Performance",
+                    f"{symbol} {direction.capitalize()} Full Backtest Performance" if full_df is not None else None,
+                ],
+                vertical_spacing=0.1,
+            )
 
-        # Get unique strategies for consistent colors
-        strategies = in_sample_df[in_sample_df["Symbol"] == symbol]["Strategy"].unique()
+            # Get unique strategies for consistent colors
+            strategies = in_sample_df[
+                (in_sample_df["Symbol"] == symbol) & 
+                (in_sample_df["Direction"] == direction)
+            ]["Strategy"].unique()
 
-        # Plot in-sample results
-        for strategy in strategies:
-            strategy_results = in_sample_df[
-                (in_sample_df["Symbol"] == symbol)
-                & (in_sample_df["Strategy"] == strategy)
-            ]
-            for _, result in strategy_results.iterrows():
-                if result["Portfolio"] is not None:
-                    pf_fig = result["Portfolio"].plot_cum_returns()
-                    for trace in pf_fig.data:
-                        trace.name = f"{strategy} ({result['Direction']})"
-                        fig.add_trace(trace, row=1, col=1)
-
-        # Plot out-of-sample results
-        for strategy in strategies:
-            strategy_results = out_sample_df[
-                (out_sample_df["Symbol"] == symbol)
-                & (out_sample_df["Strategy"] == strategy)
-            ]
-            for _, result in strategy_results.iterrows():
-                if result["Portfolio"] is not None:
-                    pf_fig = result["Portfolio"].plot_cum_returns()
-                    for trace in pf_fig.data:
-                        trace.name = f"{strategy} ({result['Direction']})"
-                        fig.add_trace(trace, row=2, col=1)
-
-        # Plot full backtest results if available
-        if full_df is not None:
+            # Plot in-sample results
             for strategy in strategies:
-                strategy_results = full_df[
-                    (full_df["Symbol"] == symbol) & (full_df["Strategy"] == strategy)
+                strategy_results = in_sample_df[
+                    (in_sample_df["Symbol"] == symbol) &
+                    (in_sample_df["Strategy"] == strategy) &
+                    (in_sample_df["Direction"] == direction)
                 ]
                 for _, result in strategy_results.iterrows():
                     if result["Portfolio"] is not None:
                         pf_fig = result["Portfolio"].plot_cum_returns()
                         for trace in pf_fig.data:
-                            trace.name = f"{strategy} ({result['Direction']})"
-                            fig.add_trace(trace, row=3, col=1)
+                            trace.name = f"{strategy}"  # Simplified name since direction is in title
+                            fig.add_trace(trace, row=1, col=1)
 
-        # Update layout
-        fig.update_layout(
-            height=400 * n_rows,
-            width=1200,
-            title=f"{symbol} Strategy Performance Comparison",
-            showlegend=True,
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.05),
-        )
+            # Plot out-of-sample results
+            for strategy in strategies:
+                strategy_results = out_sample_df[
+                    (out_sample_df["Symbol"] == symbol) &
+                    (out_sample_df["Strategy"] == strategy) &
+                    (out_sample_df["Direction"] == direction)
+                ]
+                for _, result in strategy_results.iterrows():
+                    if result["Portfolio"] is not None:
+                        pf_fig = result["Portfolio"].plot_cum_returns()
+                        for trace in pf_fig.data:
+                            trace.name = f"{strategy}"
+                            fig.add_trace(trace, row=2, col=1)
 
-        fig.show()
+            # Plot full backtest results if available
+            if full_df is not None:
+                for strategy in strategies:
+                    strategy_results = full_df[
+                        (full_df["Symbol"] == symbol) &
+                        (full_df["Strategy"] == strategy) &
+                        (full_df["Direction"] == direction)
+                    ]
+                    for _, result in strategy_results.iterrows():
+                        if result["Portfolio"] is not None:
+                            pf_fig = result["Portfolio"].plot_cum_returns()
+                            for trace in pf_fig.data:
+                                trace.name = f"{strategy}"
+                                fig.add_trace(trace, row=3, col=1)
+
+            # Update layout
+            fig.update_layout(
+                height=400 * n_rows,
+                width=1200,
+                title=f"{symbol} {direction.capitalize()} Strategy Performance Comparison",
+                showlegend=True,
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.05),
+            )
+
+            # Update y-axes to log scale
+            for i in range(1, n_rows + 1):
+                fig.update_yaxes(type="log", row=i, col=1)
+
+            fig.show()
 
 
 def display_results(results_dict, symbols=["BTC", "ETH"], display_mode='both'):
@@ -434,16 +459,24 @@ def display_results(results_dict, symbols=["BTC", "ETH"], display_mode='both'):
                 )
                 table_fig.show()
             
-            if display_mode in ['grid', 'both']:
-                # Show grid style plots
+            # Only show one type of plot visualization
+            if display_mode == 'grid':
                 plot_strategy_results(results_dict, symbols=[symbol])
-                
-            if display_mode in ['vertical', 'both']:
-                # Show vertical comparison plots
+            elif display_mode == 'vertical':
                 if all(k in results_dict for k in ['in_sample', 'out_sample']):
                     plot_performance_comparison(
                         results_dict['in_sample'],
                         results_dict['out_sample'],
-                        results_dict.get('full', None),  # Optional full backtest results
+                        results_dict.get('full', None),
                         symbols=[symbol]
-                    ) 
+                    )
+            elif display_mode == 'both':
+                # For 'both', only use plot_performance_comparison as it's more comprehensive
+                if all(k in results_dict for k in ['in_sample', 'out_sample']):
+                    plot_performance_comparison(
+                        results_dict['in_sample'],
+                        results_dict['out_sample'],
+                        results_dict.get('full', None),
+                        symbols=[symbol]
+                    )
+                
